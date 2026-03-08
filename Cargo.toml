@@ -1,0 +1,31 @@
+[package]
+name = "axum78"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Web 框架
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 异步 trait
+async-trait = "0.1"
+
+# 数据库 (复用现有)
+database = { path = "../database" }
+base = { path = "../base" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 工具
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
