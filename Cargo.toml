@@ -18,7 +18,7 @@ serde_json = "1.0"
 async-trait = "0.1"
 
 # 数据库 (复用现有)
-database = { path = "../database" }
+datastate = { path = "../database" }
 base = { path = "../base" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
