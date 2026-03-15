@@ -53,6 +53,8 @@ pub mod response;
 pub mod base_api;
 pub mod router;
 pub mod server;
+pub mod proto;
+pub mod sync;
 
 // 重导出常用类型
 pub use context::Context;
@@ -60,6 +62,7 @@ pub use response::{ApiResponse, ApiError};
 pub use base_api::{BaseApi, TableConfig};
 pub use router::ApiRouter;
 pub use server::Server;
+pub use sync::{DataSync, SyncConfig, SyncResult};
 
 // 重导出 async_trait
 pub use async_trait::async_trait;

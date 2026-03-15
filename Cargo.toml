@@ -14,12 +14,15 @@ tower-http = { version = "0.5", features = ["cors"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# Protobuf
+prost = "0.13"
+
 # 异步 trait
 async-trait = "0.1"
 
 # 数据库 (复用现有)
 datastate = { path = "../database" }
-base = { path = "../base" }
+base = { git = "https://github.com/www778878net/rustbase.git" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # 日志
@@ -29,3 +32,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 工具
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+
+# HTTP 客户端 (用于同步)
+reqwest = { version = "0.12", features = ["json"] }
+
+[build-dependencies]
