@@ -55,45 +55,7 @@ pub async fn handle(apifun: &str, up: UpInfo, db: &Sqlite78) -> (StatusCode, Byt
     }
 }
 
-/// GET - 获取数据列表
-async fn get(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
-    let expected_cid = if up.sid.is_empty() {
-        let resp = Response::fail("无效的SID", -1);
-        return (StatusCode::UNAUTHORIZED, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-    } else if up.sid.contains('|') {
-        up.sid.split('|').next().unwrap_or("").to_string()
-    } else {
-        up.sid.clone()
-    };
-
-    ensure_testtb_table(db);
-
-    let sql = "SELECT * FROM testtb WHERE cid = ? OR cid = '' ORDER BY idpk DESC LIMIT ?";
-    let rows = match db.do_get(sql, &[&expected_cid as &dyn rusqlite::ToSql, &up.getnumber as &dyn rusqlite::ToSql], up) {
-        Ok(r) => r,
-        Err(e) => {
-            let resp = Response::fail(&format!("查询失败: {}", e), -1);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-        }
-    };
-
-    let items: Vec<testtbItem> = rows
-        .iter()
-        .map(|row| testtbItem {
-            id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            idpk: row.get("idpk").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-            cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            kind: row.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            item: row.get("item").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            data: row.get("data").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        })
-        .collect();
-
-    let result = testtb { items };
-    let resp = Response::success_bytes(result.encode_to_vec());
-
-    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-}
+ 
 
 /// TEST - 测试接口
 async fn test(up: &UpInfo) -> (StatusCode, Bytes) {

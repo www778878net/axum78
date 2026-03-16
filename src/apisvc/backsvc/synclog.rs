@@ -353,9 +353,13 @@ fn process_synclog_item(
 
             let new_id = if id.is_empty() { uuid::Uuid::new_v4().to_string() } else { id.to_string() };
             
+            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S");
+            let upby = up.upby.clone();
+            let uptime = now.to_string();
+            
             db.do_m(
-                "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)",
-                &[&new_id as &dyn rusqlite::ToSql, &cid, &kind, &item, &data],
+                "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                &[&new_id as &dyn rusqlite::ToSql, &cid, &kind, &item, &data, &upby, &uptime],
                 up,
             ).map(|_| ()).map_err(|e| e)
         }
