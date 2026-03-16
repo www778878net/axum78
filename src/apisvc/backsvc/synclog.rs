@@ -195,7 +195,13 @@ async fn do_work(db: &Sqlite78) -> (StatusCode, Bytes) {
             let idpk = row.get("idpk").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let tbname = row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let params_str = row.get("params").and_then(|v| v.as_str()).unwrap_or("[]").to_string();
+            let params_str = {
+                match row.get("params") {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(v @ serde_json::Value::Array(_)) => serde_json::to_string(v).unwrap_or_default(),
+                    _ => "[]".to_string(),
+                }
+            };
             let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
             let result = process_synclog_item(db, &up, &tbname, &action, &params_str, &idrow);
