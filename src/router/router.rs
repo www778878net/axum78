@@ -11,8 +11,8 @@
 use axum::{
     Router,
     routing::post,
-    extract::{Path, Json as AxumJson},
-    response::Json,
+    extract::{Path, State, Json as AxumJson},
+    response::IntoResponse,
     http::StatusCode,
 };
 use async_trait::async_trait;
@@ -33,14 +33,13 @@ pub trait Controller78: Send + Sync + 'static {
     async fn call(&self, up: &mut UpInfo, fun: &str) -> Value;
 }
 
-/// 4级路由构建器
-pub struct ApiRouter78 {
-    router: Router<Arc<RouterState>>,
+/// 路由状态 (内部共享)
+struct RouterState {
     controllers: HashMap<String, Arc<dyn Controller78>>,
 }
 
-/// 路由状态
-pub struct RouterState {
+/// 4级路由构建器
+pub struct ApiRouter78 {
     controllers: HashMap<String, Arc<dyn Controller78>>,
 }
 
@@ -48,7 +47,6 @@ impl ApiRouter78 {
     /// 创建新路由
     pub fn new() -> Self {
         Self {
-            router: Router::new(),
             controllers: HashMap::new(),
         }
     }
@@ -82,16 +80,16 @@ impl Default for ApiRouter78 {
 
 /// 4级路由 API 处理器
 async fn api_handler(
+    State(state): State<Arc<RouterState>>,
     Path((apisys, apimicro, apiobj, apifun)): Path<(String, String, String, String)>,
     AxumJson(body): AxumJson<RequestBody>,
-    axum::extract::State(state): axum::extract::State<Arc<RouterState>>,
-) -> (StatusCode, Json<ApiResponse>) {
+) -> impl IntoResponse {
     // ========== 安全校验 ==========
     // apifun 不能以 "_" 开头 (私有方法)
     if apifun.starts_with('_') {
         return (
             StatusCode::FORBIDDEN,
-            Json(ApiResponse::fail("Access denied: private method", -4)),
+            axum::Json(ApiResponse::fail("Access denied: private method", -4)),
         );
     }
 
@@ -99,7 +97,7 @@ async fn api_handler(
     if !apisys.to_lowercase().starts_with("api") {
         return (
             StatusCode::FORBIDDEN,
-            Json(ApiResponse::fail("Access denied: invalid api system", -4)),
+            axum::Json(ApiResponse::fail("Access denied: invalid api system", -4)),
         );
     }
 
@@ -107,7 +105,7 @@ async fn api_handler(
     if apimicro.to_lowercase().starts_with("dll") {
         return (
             StatusCode::FORBIDDEN,
-            Json(ApiResponse::fail("Access denied: dll not allowed", -4)),
+            axum::Json(ApiResponse::fail("Access denied: dll not allowed", -4)),
         );
     }
 
@@ -118,7 +116,7 @@ async fn api_handler(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(ApiResponse::fail(&format!("Controller not found: {}", controller_path), -1)),
+                axum::Json(ApiResponse::fail(&format!("Controller not found: {}", controller_path), -1)),
             );
         }
     };
@@ -134,13 +132,13 @@ async fn api_handler(
     if up.res != 0 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::fail(&up.errmsg, up.res)),
+            axum::Json(ApiResponse::fail(&up.errmsg, up.res)),
         );
     }
 
     let mut resp = ApiResponse::success(result);
     resp.kind = up.backtype;
-    (StatusCode::OK, Json(resp))
+    (StatusCode::OK, axum::Json(resp))
 }
 
 /// 保留旧的 ApiRouter 别名 (向后兼容)

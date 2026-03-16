@@ -5,8 +5,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use chrono::Local;
-use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
 
 /// API 请求上下文 - 对应 koa78-base78 的 UpInfo
 ///
@@ -33,6 +31,9 @@ pub struct UpInfo {
     /// 用户 ID
     #[serde(default)]
     pub uid: String,
+    /// 用户名
+    #[serde(default)]
+    pub uname: String,
 
     // ========== 请求参数 ==========
     /// 方法参数数组
