@@ -13,6 +13,7 @@ pub mod server;
 
 pub mod apitest;
 pub mod apisvc;
+pub mod apigame;
 
 pub use context::{UpInfo, RequestBody, Context};
 pub use response::{ApiResponse, ApiError};
@@ -40,6 +41,7 @@ use axum::{
 use std::sync::Arc;
 use base::Response;
 use database::Sqlite78;
+use tower_http::cors::{CorsLayer, Any};
 
 pub struct AppState {
     pub db: Sqlite78,
@@ -56,10 +58,16 @@ impl AppState {
 pub fn create_router(db_path: &str) -> AxumRouter {
     let state = Arc::new(AppState::new(db_path));
     
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+    
     AxumRouter::new()
         .route("/:apisys/:apimicro/:apiobj/:apifun", any(api_handler))
         .route("/health", axum::routing::get(health_handler))
         .with_state(state)
+        .layer(cors)
 }
 
 async fn health_handler() -> impl IntoResponse {
@@ -94,6 +102,9 @@ async fn api_handler(
         }
         ("apisvc", "backsvc", "synclog") => {
             apisvc::backsvc::synclog::handle(&apifun_lower, up, &state.db).await
+        }
+        ("apigame", "mock", "game_state") => {
+            apigame::mock::game_state::handle(&apifun_lower, up).await
         }
         _ => {
             let resp = Response::fail(&format!("API not found: {}/{}/{}/{}", apisys, apimicro, apiobj, apifun), 404);

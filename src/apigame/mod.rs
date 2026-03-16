@@ -2,4 +2,4 @@
 
 pub mod mock;
 
-pub use mock::game_state::{GameStateController, GameStateData};
+pub use mock::GameStateData;

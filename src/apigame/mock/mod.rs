@@ -2,4 +2,4 @@
 
 pub mod game_state;
 
-pub use game_state::{GameStateController, GameStateData};
+pub use game_state::GameStateData;
