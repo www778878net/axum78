@@ -40,23 +40,18 @@ use axum::{
 };
 use std::sync::Arc;
 use base::Response;
-use database::Sqlite78;
 use tower_http::cors::{CorsLayer, Any};
 
-pub struct AppState {
-    pub db: Sqlite78,
-}
+pub struct AppState;
 
 impl AppState {
-    pub fn new(db_path: &str) -> Self {
-        let mut db = Sqlite78::with_config(db_path, false, false);
-        let _ = db.initialize();
-        Self { db }
+    pub fn new() -> Self {
+        Self
     }
 }
 
-pub fn create_router(db_path: &str) -> AxumRouter {
-    let state = Arc::new(AppState::new(db_path));
+pub fn create_router() -> AxumRouter {
+    let state = Arc::new(AppState::new());
     
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -98,10 +93,10 @@ async fn api_handler(
 
     let (status, resp_bytes) = match (apisys_lower.as_str(), apimicro_lower.as_str(), apiobj.as_str()) {
         ("apitest", "testmenu", "testtb") => {
-            apitest::testmenu::testtb::handle(&apifun_lower, up, &state.db).await
+            apitest::testmenu::testtb::handle(&apifun_lower, up).await
         }
         ("apisvc", "backsvc", "synclog") => {
-            apisvc::backsvc::synclog::handle(&apifun_lower, up, &state.db).await
+            apisvc::backsvc::synclog::handle(&apifun_lower, up).await
         }
         ("apigame", "mock", "game_state") => {
             apigame::mock::game_state::handle(&apifun_lower, up).await

@@ -3,15 +3,14 @@
 //! 路径: apitest/testmenu/testtb
 //! 路由: POST /apitest/testmenu/testtb/:apifun
 //!
-//! 参考 LOGSVC 的 CidBase78 实现
-//! API函数不需要参数，通过up访问数据，db从框架获取
+//! 使用DataState基类访问数据库
 
 use axum::{
     body::Bytes,
     http::StatusCode,
 };
 use base::{UpInfo, Response};
-use database::Sqlite78;
+use database::datastate::TestTb;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 
@@ -44,9 +43,9 @@ pub struct testtb {
 // ============ API实现 ============
 
 /// 处理testtb API请求
-pub async fn handle(apifun: &str, up: UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
+pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
     match apifun.to_lowercase().as_str() {
-        "get" => get(&up, db).await,
+        "get" => get(&up).await,
         "test" => test(&up).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
@@ -54,8 +53,6 @@ pub async fn handle(apifun: &str, up: UpInfo, db: &Sqlite78) -> (StatusCode, Byt
         }
     }
 }
-
- 
 
 /// TEST - 测试接口
 async fn test(up: &UpInfo) -> (StatusCode, Bytes) {
@@ -66,23 +63,8 @@ async fn test(up: &UpInfo) -> (StatusCode, Bytes) {
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
-fn ensure_testtb_table(db: &Sqlite78) {
-    let up = UpInfo::new();
-    let sql = r#"CREATE TABLE IF NOT EXISTS testtb (
-        idpk INTEGER PRIMARY KEY AUTOINCREMENT,
-        id TEXT NOT NULL UNIQUE,
-        cid TEXT NOT NULL DEFAULT '',
-        kind TEXT NOT NULL DEFAULT '',
-        item TEXT NOT NULL DEFAULT '',
-        data TEXT NOT NULL DEFAULT '',
-        upby TEXT NOT NULL DEFAULT '',
-        uptime TEXT NOT NULL DEFAULT ''
-    )"#;
-    let _ = db.do_m(sql, &[], &up);
-}
-
 /// GET - 获取数据
-async fn get(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
+async fn get(up: &UpInfo) -> (StatusCode, Bytes) {
     let expected_cid = if up.sid.is_empty() {
         String::new()
     } else if up.sid.contains('|') {
@@ -91,10 +73,9 @@ async fn get(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
         up.sid.clone()
     };
 
-    ensure_testtb_table(db);
-
-    let sql = "SELECT * FROM testtb WHERE cid = ? OR cid = '' ORDER BY idpk DESC LIMIT ?";
-    let rows = match db.do_get(sql, &[&expected_cid as &dyn rusqlite::ToSql, &up.getnumber as &dyn rusqlite::ToSql], up) {
+    let testtb_state = TestTb::new();
+    
+    let rows = match testtb_state.mlist("testtb", up.getnumber as i32, "API查询") {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询失败: {}", e), -1);
@@ -102,17 +83,19 @@ async fn get(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
         }
     };
 
-    let items: Vec<testtbItem> = rows.iter().map(|row| testtbItem {
-        id: row.get("id").map(|v| match v {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Number(n) => n.to_string(),
-            _ => String::new(),
-        }).unwrap_or_default(),
-        idpk: row.get("idpk").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-        cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        kind: row.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        item: row.get("item").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        data: row.get("data").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    let items: Vec<testtbItem> = rows.iter().filter_map(|row| {
+        if row.cid.is_empty() || row.cid == expected_cid {
+            Some(testtbItem {
+                id: row.id.clone(),
+                idpk: row.idpk as i32,
+                cid: row.cid.clone(),
+                kind: row.kind.clone(),
+                item: row.item.clone(),
+                data: row.data.clone(),
+            })
+        } else {
+            None
+        }
     }).collect();
 
     let result = testtb { items };

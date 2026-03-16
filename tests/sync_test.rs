@@ -6,9 +6,10 @@
 //! 3. 服务器变更同步：服务器添加/修改/删除各2条，预期客户端同步后一致
 //! 4. 最后客户端和服务器testtb表一致
 
-use base::{next_id_string, UpInfo};
+use base::UpInfo;
 use base64::Engine;
-use database::Sqlite78;
+use database::datastate::TestTb;
+use database::{get_worker_id, next_id_string};
 use prost::Message;
 
 #[derive(Clone, PartialEq, Message)]
@@ -76,60 +77,9 @@ const CID: &str = "test-cid-789";
 const WORKER_A: &str = "worker-A";
 const WORKER_B: &str = "worker-B";
 
-fn get_server_db_path() -> String {
-    let project = base::ProjectPath::find().expect("查找项目根目录失败");
-    project.root().join("crates/axum78/tmp/data/remote.db").to_string_lossy().to_string()
-}
-
-fn get_client_db_path() -> String {
-    let project = base::ProjectPath::find().expect("查找项目根目录失败");
-    project.root().join("crates/axum78/tmp/data/client.db").to_string_lossy().to_string()
-}
-
-fn ensure_tables(db: &Sqlite78) {
-    let up = UpInfo::new();
-    let _ = db.do_m(r#"CREATE TABLE IF NOT EXISTS testtb (
-        idpk INTEGER PRIMARY KEY AUTOINCREMENT,
-        id TEXT NOT NULL UNIQUE,
-        cid TEXT NOT NULL DEFAULT '',
-        kind TEXT NOT NULL DEFAULT '',
-        item TEXT NOT NULL DEFAULT '',
-        data TEXT NOT NULL DEFAULT '',
-        upby TEXT NOT NULL DEFAULT '',
-        uptime TEXT NOT NULL DEFAULT ''
-    )"#, &[], &up);
-    
-    let _ = db.do_m(r#"CREATE TABLE IF NOT EXISTS synclog (
-        idpk INTEGER PRIMARY KEY AUTOINCREMENT,
-        id TEXT NOT NULL UNIQUE,
-        apisys TEXT NOT NULL DEFAULT 'v1',
-        apimicro TEXT NOT NULL DEFAULT 'iflow',
-        apiobj TEXT NOT NULL DEFAULT 'synclog',
-        tbname TEXT NOT NULL DEFAULT '',
-        action TEXT NOT NULL DEFAULT '',
-        cmdtext TEXT NOT NULL DEFAULT '',
-        params TEXT NOT NULL DEFAULT '[]',
-        idrow TEXT NOT NULL DEFAULT '',
-        worker TEXT NOT NULL DEFAULT '',
-        synced INTEGER NOT NULL DEFAULT 0,
-        lasterrinfo TEXT NOT NULL DEFAULT '',
-        cmdtextmd5 TEXT NOT NULL DEFAULT '',
-        cid TEXT NOT NULL DEFAULT '',
-        upby TEXT NOT NULL DEFAULT '',
-        uptime TEXT NOT NULL DEFAULT ''
-    )"#, &[], &up);
-}
-
-fn clear_tables(db: &Sqlite78) {
-    let up = UpInfo::new();
-    let _ = db.do_m("DELETE FROM testtb", &[], &up);
-    let _ = db.do_m("DELETE FROM synclog", &[], &up);
-}
-
-fn count_testtb(db: &Sqlite78) -> i32 {
-    let up = UpInfo::new();
-    let rows = db.do_get("SELECT COUNT(*) as cnt FROM testtb", &[], &up).unwrap_or_default();
-    rows.first().and_then(|r| r.get("cnt").and_then(|v| v.as_i64())).unwrap_or(0) as i32
+fn count_testtb() -> i32 {
+    let testtb = TestTb::new();
+    testtb.mlist("testtb", 1000, "计数").map(|r| r.len() as i32).unwrap_or(0)
 }
 
 async fn download_from_server(sid: &str) -> Result<Vec<testtbItem>, String> {
@@ -221,21 +171,15 @@ async fn test_all_plans() {
     let sid = format!("{}|{}", CID, WORKER_A);
     let up = UpInfo::new();
     
-    // 先初始化数据库（在启动服务器之前）
-    let mut server_db = Sqlite78::with_config(&get_server_db_path(), false, false);
-    server_db.initialize().expect("服务器数据库初始化失败");
+    // 清空表
+    let testtb = TestTb::new();
+    let rows = testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
+    for row in &rows {
+        let _ = testtb.m_del(&row.id, "testtb", "清空测试表");
+    }
     
-    let mut client_db = Sqlite78::with_config(&get_client_db_path(), false, false);
-    client_db.initialize().expect("客户端数据库初始化失败");
-    
-    ensure_tables(&server_db);
-    ensure_tables(&client_db);
-    clear_tables(&server_db);
-    clear_tables(&client_db);
-    
-    // 启动服务器
-    let db_path = get_server_db_path();
-    let app = axum78::create_router(&db_path);
+    // 启动服务器（使用默认数据库路径）
+    let app = axum78::create_router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3780").await.expect("绑定端口失败");
     let _server_handle = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("服务器启动失败");
@@ -247,15 +191,20 @@ async fn test_all_plans() {
     // ===== 方案1: 单向下载测试 =====
     println!("\n========== 方案1: 单向下载测试 ==========");
     
-    // 服务器插入5条数据（使用datetime('now')设置uptime）
+    // 服务器插入5条数据（使用DataState基类）
+    let testtb_state = TestTb::new();
     for i in 0..5 {
-        let id = next_id_string();
-        let sql = "INSERT INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))";
-        let _ = server_db.do_m(sql, &[&id as &dyn rusqlite::ToSql, &CID, &format!("server_kind_{}", i), &format!("server_item_{}", i), &format!("server_data_{}", i), &"testtb"], &up);
+        let mut record = std::collections::HashMap::new();
+        record.insert("cid".to_string(), serde_json::json!(CID));
+        record.insert("kind".to_string(), serde_json::json!(format!("server_kind_{}", i)));
+        record.insert("item".to_string(), serde_json::json!(format!("server_item_{}", i)));
+        record.insert("data".to_string(), serde_json::json!(format!("server_data_{}", i)));
+        
+        let id = testtb_state.m_save(&record, "testtb", &format!("方案1-服务器插入{}", i)).expect("保存失败");
         println!("服务器插入: {} -> id={}", i, &id);
     }
     
-    let server_count = count_testtb(&server_db);
+    let server_count = count_testtb();
     println!("服务器记录数: {}", server_count);
     assert_eq!(server_count, 5);
     
@@ -263,12 +212,20 @@ async fn test_all_plans() {
     let items = download_from_server(&sid).await.expect("下载失败");
     println!("下载到 {} 条记录", items.len());
     
+    // 客户端保存下载的数据
+    let client_state = TestTb::new();
     for item in &items {
-        let sql = "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))";
-        let _ = client_db.do_m(sql, &[&item.id as &dyn rusqlite::ToSql, &item.cid, &item.kind, &item.item, &item.data, &"client"], &up);
+        let mut record = std::collections::HashMap::new();
+        record.insert("id".to_string(), serde_json::json!(&item.id));
+        record.insert("cid".to_string(), serde_json::json!(&item.cid));
+        record.insert("kind".to_string(), serde_json::json!(&item.kind));
+        record.insert("item".to_string(), serde_json::json!(&item.item));
+        record.insert("data".to_string(), serde_json::json!(&item.data));
+        
+        let _ = client_state.m_save(&record, "testtb", "方案1-客户端下载");
     }
     
-    let client_count = count_testtb(&client_db);
+    let client_count = count_testtb();
     println!("客户端记录数: {}", client_count);
     assert_eq!(client_count, 5);
     println!("✅ 方案1通过");
@@ -277,17 +234,21 @@ async fn test_all_plans() {
     println!("\n========== 方案2: 客户端变更同步 ==========");
     
     // 获取现有数据用于修改/删除
-    let existing_rows = client_db.do_get("SELECT id FROM testtb LIMIT 2", &[], &up).unwrap_or_default();
-    let id_for_update = existing_rows.get(0).and_then(|r| r.get("id").and_then(|v| v.as_str())).unwrap_or("").to_string();
-    let id_for_delete = existing_rows.get(1).and_then(|r| r.get("id").and_then(|v| v.as_str())).unwrap_or("").to_string();
+    let existing = client_state.mlist("testtb", 2, "获取修改删除目标").expect("查询失败");
+    let id_for_update = existing.get(0).map(|r| r.id.clone()).unwrap_or_default();
+    let id_for_delete = existing.get(1).map(|r| r.id.clone()).unwrap_or_default();
     
     let mut synclog_items: Vec<SynclogItem> = Vec::new();
     
     // 添加2条
     for i in 0..2 {
-        let id = next_id_string();
-        let sql = "INSERT INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))";
-        let _ = client_db.do_m(sql, &[&id as &dyn rusqlite::ToSql, &CID, &format!("add_kind_{}", i), &format!("add_item_{}", i), &format!("add_data_{}", i), &WORKER_A], &up);
+        let mut record = std::collections::HashMap::new();
+        record.insert("cid".to_string(), serde_json::json!(CID));
+        record.insert("kind".to_string(), serde_json::json!(format!("add_kind_{}", i)));
+        record.insert("item".to_string(), serde_json::json!(format!("add_item_{}", i)));
+        record.insert("data".to_string(), serde_json::json!(format!("add_data_{}", i)));
+        
+        let id = client_state.m_save(&record, "testtb", &format!("方案2-客户端添加{}", i)).expect("保存失败");
         
         synclog_items.push(SynclogItem {
             id: next_id_string(),
@@ -309,8 +270,11 @@ async fn test_all_plans() {
     println!("客户端添加2条");
     
     // 修改1条
-    let sql = "UPDATE testtb SET kind = ?, item = ?, data = ?, upby = ?, uptime = datetime('now') WHERE id = ?";
-    let _ = client_db.do_m(sql, &[&"updated_kind" as &dyn rusqlite::ToSql, &"updated_item", &"updated_data", &WORKER_A, &id_for_update], &up);
+    let mut update_record = std::collections::HashMap::new();
+    update_record.insert("kind".to_string(), serde_json::json!("updated_kind"));
+    update_record.insert("item".to_string(), serde_json::json!("updated_item"));
+    update_record.insert("data".to_string(), serde_json::json!("updated_data"));
+    client_state.m_update(&id_for_update, &update_record, "testtb", "方案2-客户端修改").expect("修改失败");
     
     synclog_items.push(SynclogItem {
         id: next_id_string(),
@@ -331,8 +295,7 @@ async fn test_all_plans() {
     println!("客户端修改1条");
     
     // 删除1条
-    let sql = "DELETE FROM testtb WHERE id = ?";
-    let _ = client_db.do_m(sql, &[&id_for_delete as &dyn rusqlite::ToSql], &up);
+    client_state.m_del(&id_for_delete, "testtb", "方案2-客户端删除").expect("删除失败");
     
     synclog_items.push(SynclogItem {
         id: next_id_string(),
@@ -361,8 +324,8 @@ async fn test_all_plans() {
     println!("doWork处理 {} 条", processed);
     
     // 验证服务器数据
-    let server_count = count_testtb(&server_db);
-    let client_count = count_testtb(&client_db);
+    let server_count = count_testtb();
+    let client_count = count_testtb();
     println!("客户端记录数: {}", client_count);
     println!("服务器记录数: {}", server_count);
     assert_eq!(client_count, server_count);
@@ -432,40 +395,42 @@ async fn test_all_plans() {
     
     println!("下载到 {} 条synclog", synclog_batch.items.len());
     
-    // 执行synclog中的SQL
+    // 执行synclog中的SQL（使用DataState基类）
     for item in &synclog_batch.items {
         let params: Vec<serde_json::Value> = serde_json::from_str(&item.params).unwrap_or_default();
         println!("执行: action={}, params={:?}", item.action, params);
         match item.action.as_str() {
             "insert" => {
-                let sql = "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))";
-                let p0 = params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let p1 = params.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let p2 = params.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let p3 = params.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let p4 = params.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let result = client_db.do_m(sql, &[&p0 as &dyn rusqlite::ToSql, &p1, &p2, &p3, &p4, &WORKER_A], &up);
-                println!("INSERT结果: {:?}, id={}", result, p0);
+                let mut record = std::collections::HashMap::new();
+                record.insert("id".to_string(), serde_json::Value::String(params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string()));
+                record.insert("cid".to_string(), serde_json::Value::String(params.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string()));
+                record.insert("kind".to_string(), serde_json::Value::String(params.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string()));
+                record.insert("item".to_string(), serde_json::Value::String(params.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string()));
+                record.insert("data".to_string(), serde_json::Value::String(params.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string()));
+                
+                let result = client_state.m_save(&record, "testtb", "方案3-客户端同步插入");
+                let id_str = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
+                println!("INSERT结果: {:?}, id={}", result, id_str);
             }
             "update" => {
-                let sql = "UPDATE testtb SET kind = ?, item = ?, data = ?, upby = ?, uptime = datetime('now') WHERE id = ?";
-                let p0 = params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let p1 = params.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let p2 = params.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let p3 = params.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let _ = client_db.do_m(sql, &[&p0 as &dyn rusqlite::ToSql, &p1, &p2, &WORKER_A, &p3], &up);
+                let id = params.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let mut record = std::collections::HashMap::new();
+                record.insert("kind".to_string(), serde_json::Value::String(params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string()));
+                record.insert("item".to_string(), serde_json::Value::String(params.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string()));
+                record.insert("data".to_string(), serde_json::Value::String(params.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string()));
+                
+                let _ = client_state.m_update(&id, &record, "testtb", "方案3-客户端同步修改");
             }
             "delete" => {
-                let sql = "DELETE FROM testtb WHERE id = ?";
-                let p0 = params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let _ = client_db.do_m(sql, &[&p0 as &dyn rusqlite::ToSql], &up);
+                let id = params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let _ = client_state.m_del(&id, "testtb", "方案3-客户端同步删除");
             }
             _ => {}
         }
     }
     
-    let server_count = count_testtb(&server_db);
-    let client_count = count_testtb(&client_db);
+    let server_count = count_testtb();
+    let client_count = count_testtb();
     println!("客户端记录数: {}", client_count);
     println!("服务器记录数: {}", server_count);
     assert_eq!(client_count, server_count);
@@ -473,23 +438,11 @@ async fn test_all_plans() {
     
     // 验证upby/uptime字段
     println!("\n========== 验证upby/uptime字段 ==========");
-    let server_rows = server_db.do_get("SELECT id, kind, upby, uptime FROM testtb LIMIT 3", &[], &up).unwrap_or_default();
-    for row in &server_rows {
-        let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        let upby = row.get("upby").and_then(|v| v.as_str()).unwrap_or("");
-        let uptime = row.get("uptime").and_then(|v| v.as_str()).unwrap_or("");
-        println!("服务器: id={}, kind={}, upby={}, uptime={}", &id[..8.min(id.len())], kind, upby, uptime);
-    }
-    
-    let client_rows = client_db.do_get("SELECT id, kind, upby, uptime FROM testtb LIMIT 3", &[], &up).unwrap_or_default();
-    for row in &client_rows {
-        let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        let upby = row.get("upby").and_then(|v| v.as_str()).unwrap_or("");
-        let uptime = row.get("uptime").and_then(|v| v.as_str()).unwrap_or("");
-        println!("客户端: id={}, kind={}, upby={}, uptime={}", &id[..8.min(id.len())], kind, upby, uptime);
+    let rows = client_state.mlist("testtb", 3, "验证字段").unwrap_or_default();
+    for row in &rows {
+        println!("客户端: id={}, kind={}, upby={}, uptime={}", &row.id[..8.min(row.id.len())], row.kind, row.upby, row.uptime);
     }
     
     println!("\n========== 所有测试通过 ==========");
+    println!("worker_id: {}", get_worker_id());
 }

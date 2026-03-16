@@ -5,21 +5,15 @@
 //! 同步机制: 上传synclog记录 -> doWork执行实际操作
 
 use axum78::create_router;
-use base::ProjectPath;
 
 #[tokio::main]
 async fn main() {
-    let project = ProjectPath::find().expect("查找项目根目录失败");
-    let db_path = project.root().join("crates/axum78/tmp/data/remote.db");
-    let db_path = db_path.to_string_lossy().to_string();
-    
-    let app = create_router(&db_path);
+    let app = create_router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3780").await.expect("绑定端口失败");
     
     tracing_subscriber::fmt::init();
     
     tracing::info!("同步服务器启动: http://127.0.0.1:3780");
-    tracing::info!("数据库: {}", db_path);
     tracing::info!("端点:");
     tracing::info!("  POST /:apisys/:apimicro/:apiobj/:apifun - 4级路由API");
     tracing::info!("  POST /apitest/testmenu/testtb/get - 下载数据");
