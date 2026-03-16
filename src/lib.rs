@@ -35,6 +35,7 @@ pub mod router;
 pub mod server;
 pub mod proto;
 pub mod sync;
+pub mod apigame;
 
 // 重导出常用类型
 pub use context::{UpInfo, RequestBody, Context};
