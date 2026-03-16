@@ -1,10 +1,11 @@
 //! Protobuf 消息定义
 //!
-//! 手动定义，避免 protoc 编译依赖
+//! 参考 LOGSVC proto/apitest/testmenu/testtb.proto
 
 use prost::Message;
 use serde::{Deserialize, Serialize};
 
+/// testtb 单项数据结构
 #[derive(Clone, PartialEq, Message, Serialize, Deserialize)]
 pub struct testtbItem {
     #[prost(string, tag = "1")]
@@ -19,36 +20,29 @@ pub struct testtbItem {
     pub item: String,
     #[prost(string, tag = "6")]
     pub data: String,
-    #[prost(string, tag = "7")]
-    pub upby: String,
-    #[prost(string, tag = "8")]
-    pub uptime: String,
 }
 
+/// testtb 包含多项的数据结构
 #[derive(Clone, PartialEq, Message)]
 pub struct testtb {
-    #[prost(string, tag = "1")]
-    pub sid: String,
-    #[prost(message, repeated, tag = "2")]
+    #[prost(message, repeated, tag = "1")]
     pub items: Vec<testtbItem>,
 }
 
+/// 同步请求 - 用于 get 操作
 #[derive(Clone, PartialEq, Message)]
 pub struct SyncRequest {
     #[prost(string, tag = "1")]
-    pub table_name: String,
-    #[prost(string, tag = "2")]
     pub sid: String,
-    #[prost(string, tag = "3")]
+    #[prost(string, tag = "2")]
     pub cid: String,
-    #[prost(int32, tag = "4")]
+    #[prost(int32, tag = "3")]
     pub getstart: i32,
-    #[prost(int32, tag = "5")]
+    #[prost(int32, tag = "4")]
     pub getnumber: i32,
-    #[prost(string, tag = "6")]
-    pub last_uptime: String,
 }
 
+/// 同步响应 - 用于 get 操作返回
 #[derive(Clone, PartialEq, Message)]
 pub struct SyncResponse {
     #[prost(int32, tag = "1")]
@@ -57,12 +51,18 @@ pub struct SyncResponse {
     pub errmsg: String,
     #[prost(message, repeated, tag = "3")]
     pub items: Vec<testtbItem>,
-    #[prost(int32, tag = "4")]
-    pub total: i32,
-    #[prost(string, tag = "5")]
-    pub cid: String,
 }
 
+/// 上传请求 - 用于 mAddMany 操作
+#[derive(Clone, PartialEq, Message)]
+pub struct UploadRequest {
+    #[prost(string, tag = "1")]
+    pub sid: String,
+    #[prost(message, repeated, tag = "2")]
+    pub items: Vec<testtbItem>,
+}
+
+/// 上传响应 - 用于 mAddMany 操作返回
 #[derive(Clone, PartialEq, Message)]
 pub struct UploadResponse {
     #[prost(int32, tag = "1")]
@@ -75,6 +75,7 @@ pub struct UploadResponse {
     pub errors: Vec<SyncError>,
 }
 
+/// 同步错误
 #[derive(Clone, PartialEq, Message)]
 pub struct SyncError {
     #[prost(int32, tag = "1")]
