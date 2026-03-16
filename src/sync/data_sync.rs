@@ -389,6 +389,7 @@ impl DataSync {
     /// 编码为 protobuf
     pub fn encode_items(&self, items: &[testtbItem]) -> Vec<u8> {
         let msg = testtb {
+            sid: String::new(),
             items: items.to_vec(),
         };
         msg.encode_to_vec()
@@ -519,6 +520,7 @@ impl DataSync {
 
         let request = SyncRequest {
             table_name: self.config.table_name.clone(),
+            sid: String::new(),
             cid: self.config.cid.clone(),
             getstart: 0,
             getnumber: self.config.getnumber,

@@ -27,7 +27,9 @@ pub struct testtbItem {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct testtb {
-    #[prost(message, repeated, tag = "1")]
+    #[prost(string, tag = "1")]
+    pub sid: String,
+    #[prost(message, repeated, tag = "2")]
     pub items: Vec<testtbItem>,
 }
 
@@ -36,12 +38,14 @@ pub struct SyncRequest {
     #[prost(string, tag = "1")]
     pub table_name: String,
     #[prost(string, tag = "2")]
+    pub sid: String,
+    #[prost(string, tag = "3")]
     pub cid: String,
-    #[prost(int32, tag = "3")]
-    pub getstart: i32,
     #[prost(int32, tag = "4")]
+    pub getstart: i32,
+    #[prost(int32, tag = "5")]
     pub getnumber: i32,
-    #[prost(string, tag = "5")]
+    #[prost(string, tag = "6")]
     pub last_uptime: String,
 }
 
@@ -55,4 +59,28 @@ pub struct SyncResponse {
     pub items: Vec<testtbItem>,
     #[prost(int32, tag = "4")]
     pub total: i32,
+    #[prost(string, tag = "5")]
+    pub cid: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct UploadResponse {
+    #[prost(int32, tag = "1")]
+    pub res: i32,
+    #[prost(string, tag = "2")]
+    pub errmsg: String,
+    #[prost(int32, tag = "3")]
+    pub total: i32,
+    #[prost(message, repeated, tag = "4")]
+    pub errors: Vec<SyncError>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct SyncError {
+    #[prost(int32, tag = "1")]
+    pub index: i32,
+    #[prost(string, tag = "2")]
+    pub idrow: String,
+    #[prost(string, tag = "3")]
+    pub error: String,
 }
