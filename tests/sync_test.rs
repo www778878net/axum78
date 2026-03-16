@@ -55,13 +55,13 @@ pub struct SynclogItem {
     pub idrow: String,
     #[prost(string, tag = "10")]
     pub worker: String,
-    #[prost(int32, tag = "11")]
+            #[prost(int32, tag = "11")]
     pub synced: i32,
-    #[prost(string, tag = "12")]
-    pub cmdtextmd5: String,
-    #[prost(string, tag = "13")]
-    pub cid: String,
-}
+            #[prost(string, tag = "12")]
+            pub cmdtextmd5: String,
+            #[prost(string, tag = "13")]
+            pub cid: String,
+        }
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SynclogBatch {
@@ -217,21 +217,10 @@ async fn do_work() -> Result<(i32, i32), String> {
 async fn test_all_plans() {
     println!("\n========== 多端同步测试 ==========");
     
-    // 启动服务器
-    let server_handle = tokio::spawn(async {
-        let db_path = get_server_db_path();
-        let app = axum78::create_router(&db_path);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:3780").await.expect("绑定端口失败");
-        axum::serve(listener, app).await.expect("服务器启动失败");
-    });
-    
-    // 等待服务器启动
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    
     let sid = format!("{}|{}", CID, WORKER_A);
     let up = UpInfo::new();
     
-    // 初始化数据库
+    // 先初始化数据库（在启动服务器之前）
     let mut server_db = Sqlite78::with_config(&get_server_db_path(), false, false);
     server_db.initialize().expect("服务器数据库初始化失败");
     
@@ -242,6 +231,17 @@ async fn test_all_plans() {
     ensure_tables(&client_db);
     clear_tables(&server_db);
     clear_tables(&client_db);
+    
+    // 启动服务器
+    let db_path = get_server_db_path();
+    let app = axum78::create_router(&db_path);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3780").await.expect("绑定端口失败");
+    let _server_handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("服务器启动失败");
+    });
+    
+    // 等待服务器启动
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     
     // ===== 方案1: 单向下载测试 =====
     println!("\n========== 方案1: 单向下载测试 ==========");
@@ -367,20 +367,39 @@ async fn test_all_plans() {
     // ===== 方案3: 服务器变更同步 =====
     println!("\n========== 方案3: 服务器变更同步 ==========");
     
-    // 服务器添加2条
+    // 模拟另一个客户端(worker-B)上传变更
+    let worker_b_sid = format!("{}|{}", CID, WORKER_B);
+    
+    // 服务器添加2条 (通过worker-B上传synclog，然后doWork执行)
+    let mut synclog_items_b: Vec<SynclogItem> = Vec::new();
     for i in 0..2 {
         let id = uuid::Uuid::new_v4().to_string();
-        let sql = "INSERT INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)";
-        let _ = server_db.do_m(sql, &[&id as &dyn rusqlite::ToSql, &CID, &format!("server_add_kind_{}", i), &format!("server_add_item_{}", i), &format!("server_add_data_{}", i)], &up);
         
-        // 写入synclog (worker=WORKER_B)
-        let _ = server_db.do_m(
-            "INSERT INTO synclog (id, tbname, action, cmdtext, params, idrow, worker, synced, cid) VALUES (?, ?, 'insert', ?, ?, ?, ?, 1, ?)",
-            &[&uuid::Uuid::new_v4().to_string() as &dyn rusqlite::ToSql, &"testtb", &"INSERT INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)", &serde_json::to_string(&[&id, CID, &format!("server_add_kind_{}", i), &format!("server_add_item_{}", i), &format!("server_add_data_{}", i)]).unwrap_or_default(), &id, &WORKER_B, &CID],
-            &up,
-        );
+        synclog_items_b.push(SynclogItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            apisys: "v1".to_string(),
+            apimicro: "iflow".to_string(),
+            apiobj: "synclog".to_string(),
+            tbname: "testtb".to_string(),
+            action: "insert".to_string(),
+            cmdtext: "INSERT INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)".to_string(),
+            params: serde_json::to_string(&[&id, CID, &format!("server_add_kind_{}", i), &format!("server_add_item_{}", i), &format!("server_add_data_{}", i)]).unwrap_or_default(),
+            idrow: id.clone(),
+            worker: WORKER_B.to_string(),
+            synced: 0,
+            cmdtextmd5: String::new(),
+            cid: CID.to_string(),
+        });
     }
     println!("服务器添加2条");
+    
+    // 上传synclog (通过worker-B)
+    let batches = upload_synclog(&worker_b_sid, synclog_items_b).await.expect("上传失败");
+    println!("上传 {} 条synclog", batches);
+    
+    // 执行doWork (这会在服务器端执行INSERT)
+    let (processed, _) = do_work().await.expect("doWork失败");
+    println!("doWork处理 {} 条", processed);
     
     // 客户端下载synclog (worker != WORKER_A)
     let client = reqwest::Client::new();
@@ -399,11 +418,17 @@ async fn test_all_plans() {
         panic!("下载synclog失败: {:?}", json.get("errmsg"));
     }
     
+    // 打印原始响应
+    println!("服务器响应: {:?}", json);
+    
     // jsdata是JSON字符串，里面包含bytedata(base64编码)
     let jsdata_str = json.get("jsdata").and_then(|v| v.as_str()).expect("无jsdata");
+    println!("jsdata字符串: {}", jsdata_str);
     let jsdata: serde_json::Value = serde_json::from_str(jsdata_str).expect("解析jsdata失败");
     let bytedata_base64 = jsdata.get("bytedata").and_then(|v| v.as_str()).expect("无bytedata");
+    println!("bytedata_base64长度: {}", bytedata_base64.len());
     let bytes = base64::engine::general_purpose::STANDARD.decode(bytedata_base64.as_bytes()).expect("Base64解码失败");
+    println!("解码后字节长度: {}", bytes.len());
     let synclog_batch = SynclogBatch::decode(&*bytes).expect("解码失败");
     
     println!("下载到 {} 条synclog", synclog_batch.items.len());

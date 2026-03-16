@@ -16,6 +16,7 @@ use base::{UpInfo, Response};
 use database::Sqlite78;
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 // ============ Proto定义 ============
 
@@ -259,7 +260,13 @@ async fn get(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
             tbname: row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             action: row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             cmdtext: row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            params: row.get("params").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            params: {
+                match row.get("params") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v @ Value::Array(_)) | Some(v @ Value::Object(_)) => serde_json::to_string(v).unwrap_or_default(),
+                    _ => String::new(),
+                }
+            },
             idrow: row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             worker: row.get("worker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             synced: row.get("synced").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
