@@ -85,3 +85,65 @@ pub struct SyncError {
     #[prost(string, tag = "3")]
     pub error: String,
 }
+
+/// 游戏状态 - 领主信息
+#[derive(Clone, PartialEq, Message, Serialize, Deserialize)]
+pub struct LordState {
+    #[prost(uint64, tag = "1")]
+    pub level: u64,
+    #[prost(uint64, tag = "2")]
+    pub exp: u64,
+    #[prost(uint64, tag = "3")]
+    pub exp_needed: u64,
+    #[prost(uint64, tag = "4")]
+    pub hero_bonus: u64,
+    #[prost(uint64, tag = "5")]
+    pub quest_bonus: u64,
+    #[prost(uint64, tag = "6")]
+    pub resource_bonus: u64,
+}
+
+/// 游戏状态 - 主结构
+#[derive(Clone, PartialEq, Message, Serialize, Deserialize)]
+pub struct GameState {
+    #[prost(uint64, tag = "1")]
+    pub round: u64,
+    #[prost(uint64, tag = "2")]
+    pub countdown: u64,
+    #[prost(uint64, tag = "3")]
+    pub points: u64,
+    #[prost(uint64, tag = "4")]
+    pub coins: u64,
+    #[prost(uint64, tag = "5")]
+    pub agent_count: u64,
+    #[prost(message, optional, tag = "6")]
+    pub lord: Option<LordState>,
+}
+
+/// 游戏状态响应
+#[derive(Clone, PartialEq, Message)]
+pub struct GameStateResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    #[prost(message, optional, tag = "2")]
+    pub data: Option<GameState>,
+    #[prost(string, tag = "3")]
+    pub errmsg: String,
+}
+
+/// 签到响应
+#[derive(Clone, PartialEq, Message)]
+pub struct SignInResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    #[prost(uint64, tag = "2")]
+    pub points: u64,
+    #[prost(uint64, tag = "3")]
+    pub coins: u64,
+    #[prost(uint64, tag = "4")]
+    pub total_points: u64,
+    #[prost(uint64, tag = "5")]
+    pub total_coins: u64,
+    #[prost(string, tag = "6")]
+    pub errmsg: String,
+}

@@ -7,27 +7,42 @@
 //! 示例:
 //! - POST /apitest/testmenu/testtb/get
 //! - POST /apitest/testmenu/testtb/mAddMany
+//! - POST /apigame/era/game_state/GetState
 
 use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{header, StatusCode},
     response::IntoResponse,
-    routing::{any, get, post},
+    routing::{any, get},
     Router,
 };
 use prost::Message;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::proto::{SyncRequest, SyncResponse, UploadRequest, UploadResponse, SyncError, testtbItem};
+use crate::proto::{
+    SyncRequest, SyncResponse, UploadRequest, UploadResponse, SyncError, testtbItem,
+    GameState, GameStateResponse, LordState, SignInResponse,
+};
 
 pub struct AppState {
     pub db_path: String,
+    pub game_round: AtomicU64,
+    pub game_countdown: AtomicU64,
+    pub game_points: AtomicU64,
+    pub game_coins: AtomicU64,
 }
 
 impl AppState {
     pub fn new(db_path: &str) -> Self {
-        Self { db_path: db_path.to_string() }
+        Self {
+            db_path: db_path.to_string(),
+            game_round: AtomicU64::new(1),
+            game_countdown: AtomicU64::new(300),
+            game_points: AtomicU64::new(1250),
+            game_coins: AtomicU64::new(5820),
+        }
     }
 }
 
@@ -62,46 +77,45 @@ async fn api_handler(
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "application/x-protobuf")], Bytes::from(response.encode_to_vec()));
     }
 
-    let response = match (apisys_lower.as_str(), apimicro_lower.as_str(), apiobj.as_str(), apifun_lower.as_str()) {
+    let (status, response_bytes) = match (apisys_lower.as_str(), apimicro_lower.as_str(), apiobj.as_str(), apifun_lower.as_str()) {
         ("apitest", "testmenu", "test78", "test") => {
-            SyncResponse {
+            let response = SyncResponse {
                 res: 0,
                 errmsg: "看到我说明路由ok,中文ok,无权限调用OK".to_string(),
                 items: vec![],
-            }
+            };
+            (StatusCode::OK, Bytes::from(response.encode_to_vec()))
         }
         ("apitest", "testmenu", "testtb", "get") => {
-            handle_testtb_get(&state, &body).await
+            let response = handle_testtb_get(&state, &body).await;
+            (StatusCode::OK, Bytes::from(response.encode_to_vec()))
         }
         ("apitest", "testmenu", "testtb", "maddmany") => {
-            let upload_response = handle_testtb_maddmany(&state, &body).await;
-            return (StatusCode::OK, [(header::CONTENT_TYPE, "application/x-protobuf")], Bytes::from(upload_response.encode_to_vec()));
+            let response = handle_testtb_maddmany(&state, &body).await;
+            (StatusCode::OK, Bytes::from(response.encode_to_vec()))
+        }
+        ("apigame", "era", "game_state", "getstate") => {
+            let response = handle_game_state_get(&state).await;
+            (StatusCode::OK, Bytes::from(response.encode_to_vec()))
+        }
+        ("apigame", "era", "game_state", "signin") => {
+            let response = handle_signin(&state).await;
+            (StatusCode::OK, Bytes::from(response.encode_to_vec()))
         }
         _ => {
-            SyncResponse {
+            let response = SyncResponse {
                 res: 404,
                 errmsg: format!("API not found: {}/{}/{}/{}", apisys, apimicro, apiobj, apifun),
                 items: vec![],
-            }
+            };
+            (StatusCode::NOT_FOUND, Bytes::from(response.encode_to_vec()))
         }
     };
 
-    let status = if response.res == 0 {
-        StatusCode::OK
-    } else if response.res == 403 {
-        StatusCode::FORBIDDEN
-    } else if response.res == 404 {
-        StatusCode::NOT_FOUND
-    } else if response.res == -1 {
-        StatusCode::INTERNAL_SERVER_ERROR
-    } else {
-        StatusCode::OK
-    };
-
-    (status, [(header::CONTENT_TYPE, "application/x-protobuf")], Bytes::from(response.encode_to_vec()))
+    (status, [(header::CONTENT_TYPE, "application/x-protobuf")], response_bytes)
 }
 
-async fn handle_testtb_get(state: &AppState, body: &[u8]) -> SyncResponse {
+async fn handle_testtb_get(state: &Arc<AppState>, body: &[u8]) -> SyncResponse {
     use crate::sync::DataSync;
     
     let sync = DataSync::with_remote_db(&state.db_path);
@@ -158,7 +172,7 @@ async fn handle_testtb_get(state: &AppState, body: &[u8]) -> SyncResponse {
     }
 }
 
-async fn handle_testtb_maddmany(state: &AppState, body: &[u8]) -> UploadResponse {
+async fn handle_testtb_maddmany(state: &Arc<AppState>, body: &[u8]) -> UploadResponse {
     use crate::sync::DataSync;
     
     let sync = DataSync::with_remote_db(&state.db_path);
@@ -235,5 +249,49 @@ async fn handle_testtb_maddmany(state: &AppState, body: &[u8]) -> UploadResponse
         errmsg: "ok".to_string(),
         total,
         errors,
+    }
+}
+
+async fn handle_game_state_get(state: &Arc<AppState>) -> GameStateResponse {
+    GameStateResponse {
+        success: true,
+        data: Some(GameState {
+            round: state.game_round.load(Ordering::Relaxed),
+            countdown: state.game_countdown.load(Ordering::Relaxed),
+            points: state.game_points.load(Ordering::Relaxed),
+            coins: state.game_coins.load(Ordering::Relaxed),
+            agent_count: 3,
+            lord: Some(LordState {
+                level: 5,
+                exp: 7500,
+                exp_needed: 10000,
+                hero_bonus: 15,
+                quest_bonus: 20,
+                resource_bonus: 10,
+            }),
+        }),
+        errmsg: "ok".to_string(),
+    }
+}
+
+async fn handle_signin(state: &Arc<AppState>) -> SignInResponse {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    
+    let points = 50 + (timestamp % 100);
+    let coins = 20 + ((timestamp / 100) % 50);
+    
+    state.game_points.fetch_add(points, Ordering::Relaxed);
+    state.game_coins.fetch_add(coins, Ordering::Relaxed);
+    
+    SignInResponse {
+        success: true,
+        points,
+        coins,
+        total_points: state.game_points.load(Ordering::Relaxed),
+        total_coins: state.game_coins.load(Ordering::Relaxed),
+        errmsg: "ok".to_string(),
     }
 }
