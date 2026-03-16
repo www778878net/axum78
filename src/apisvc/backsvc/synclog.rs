@@ -268,8 +268,13 @@ async fn get(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
         })
         .collect();
 
+    use base64::{Engine as _, engine::general_purpose};
     let result = SynclogBatch { items };
-    let resp = Response::success_bytes(result.encode_to_vec());
+    let bytedata = result.encode_to_vec();
+    let mut output_buf = vec![0u8; bytedata.len() * 2];
+    let len = base64::engine::general_purpose::STANDARD.encode_slice(&bytedata, &mut output_buf).unwrap();
+    let bytedata_base64 = String::from_utf8(output_buf[..len].to_vec()).unwrap();
+    let resp = Response::success_json(&serde_json::json!({ "bytedata": bytedata_base64 }));
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 

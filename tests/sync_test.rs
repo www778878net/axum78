@@ -6,7 +6,8 @@
 //! 3. 服务器变更同步：服务器添加/修改/删除各2条，预期客户端同步后一致
 //! 4. 冲突测试
 
-use base::{UpInfo, Response};
+use base::{UpInfo};
+use base64::Engine;
 use database::Sqlite78;
 use prost::Message;
 
@@ -216,6 +217,17 @@ async fn do_work() -> Result<(i32, i32), String> {
 async fn test_all_plans() {
     println!("\n========== 多端同步测试 ==========");
     
+    // 启动服务器
+    let server_handle = tokio::spawn(async {
+        let db_path = get_server_db_path();
+        let app = axum78::create_router(&db_path);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:3780").await.expect("绑定端口失败");
+        axum::serve(listener, app).await.expect("服务器启动失败");
+    });
+    
+    // 等待服务器启动
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    
     let sid = format!("{}|{}", CID, WORKER_A);
     let up = UpInfo::new();
     
@@ -387,8 +399,10 @@ async fn test_all_plans() {
         panic!("下载synclog失败: {:?}", json.get("errmsg"));
     }
     
-    // bytedata是base64编码的字符串
-    let bytedata_base64 = json.get("bytedata").and_then(|v| v.as_str()).expect("无bytedata");
+    // jsdata是JSON字符串，里面包含bytedata(base64编码)
+    let jsdata_str = json.get("jsdata").and_then(|v| v.as_str()).expect("无jsdata");
+    let jsdata: serde_json::Value = serde_json::from_str(jsdata_str).expect("解析jsdata失败");
+    let bytedata_base64 = jsdata.get("bytedata").and_then(|v| v.as_str()).expect("无bytedata");
     let bytes = base64::engine::general_purpose::STANDARD.decode(bytedata_base64.as_bytes()).expect("Base64解码失败");
     let synclog_batch = SynclogBatch::decode(&*bytes).expect("解码失败");
     
@@ -397,6 +411,7 @@ async fn test_all_plans() {
     // 执行synclog中的SQL
     for item in &synclog_batch.items {
         let params: Vec<serde_json::Value> = serde_json::from_str(&item.params).unwrap_or_default();
+        println!("执行: action={}, params={:?}", item.action, params);
         match item.action.as_str() {
             "insert" => {
                 let sql = "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)";
@@ -405,7 +420,8 @@ async fn test_all_plans() {
                 let p2 = params.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let p3 = params.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let p4 = params.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let _ = client_db.do_m(sql, &[&p0 as &dyn rusqlite::ToSql, &p1, &p2, &p3, &p4], &up);
+                let result = client_db.do_m(sql, &[&p0 as &dyn rusqlite::ToSql, &p1, &p2, &p3, &p4], &up);
+                println!("INSERT结果: {:?}, id={}", result, p0);
             }
             "update" => {
                 let sql = "UPDATE testtb SET kind = ?, item = ?, data = ? WHERE id = ?";
