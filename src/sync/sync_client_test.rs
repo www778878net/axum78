@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 mod sync_client_tests {
-    use crate::proto::{testtb, testtbItem, SyncRequest, SyncResponse};
+    use crate::proto::{testtb, testtbItem, SyncRequest, SyncResponse, UploadResponse};
     use crate::sync::DataSync;
     use prost::Message;
     use reqwest::Client;
@@ -15,13 +15,13 @@ mod sync_client_tests {
     async fn test_upload_pending_to_server() {
         let client = Client::new();
 
-        let mut sync = DataSync::with_remote_db("tmp/data/client.db");
+        let sync = DataSync::with_remote_db("tmp/data/client.db");
         sync.ensure_table().expect("建表失败");
 
         let item = testtbItem {
             id: String::new(),
             idpk: 0,
-            cid: "default".to_string(),
+            cid: "test-company-id-12345".to_string(),
             kind: "pending_upload".to_string(),
             item: "pending_item".to_string(),
             data: "pending_data".to_string(),
@@ -37,7 +37,10 @@ mod sync_client_tests {
         let items = sync.get_pending_items(50).expect("获取待同步记录失败");
         assert!(!items.is_empty());
 
-        let msg = testtb { items };
+        let msg = testtb { 
+            sid: "test-company-id-12345".to_string(),
+            items 
+        };
         let encoded = msg.encode_to_vec();
 
         let response = client
@@ -51,10 +54,10 @@ mod sync_client_tests {
         assert!(response.status().is_success());
 
         let bytes = response.bytes().await.expect("读取响应失败");
-        let sync_response = SyncResponse::decode(&*bytes).expect("解码失败");
+        let upload_response = UploadResponse::decode(&*bytes).expect("解码失败");
 
-        println!("上传成功: {} 条记录", sync_response.total);
-        assert_eq!(sync_response.res, 0);
+        println!("上传成功: {} 条记录", upload_response.total);
+        assert_eq!(upload_response.res, 0);
     }
 
     #[tokio::test]
@@ -63,7 +66,8 @@ mod sync_client_tests {
 
         let request = SyncRequest {
             table_name: "testtb".to_string(),
-            cid: "default".to_string(),
+            sid: "test-company-id-12345".to_string(),
+            cid: "test-company-id-12345".to_string(),
             getstart: 0,
             getnumber: 100,
             last_uptime: String::new(),
@@ -87,7 +91,7 @@ mod sync_client_tests {
         println!("下载成功: {} 条记录", sync_response.total);
         assert_eq!(sync_response.res, 0);
 
-        let mut local_sync = DataSync::with_remote_db("tmp/data/client_download.db");
+        let local_sync = DataSync::with_remote_db("tmp/data/client_download.db");
         local_sync.ensure_table().expect("建表失败");
 
         for item in &sync_response.items {
@@ -106,7 +110,7 @@ mod sync_client_tests {
         let item1 = testtbItem {
             id: String::new(),
             idpk: 0,
-            cid: "default".to_string(),
+            cid: "test-company-id-12345".to_string(),
             kind: "flow_test_1".to_string(),
             item: "item1".to_string(),
             data: "data1".to_string(),
@@ -122,7 +126,7 @@ mod sync_client_tests {
         let update_item = testtbItem {
             id: id1.clone(),
             idpk: 0,
-            cid: "default".to_string(),
+            cid: "test-company-id-12345".to_string(),
             kind: "flow_test_updated".to_string(),
             item: "updated_item".to_string(),
             data: "updated_data".to_string(),
@@ -148,7 +152,7 @@ mod sync_client_tests {
         let local_item = testtbItem {
             id: uuid::Uuid::new_v4().to_string(),
             idpk: 0,
-            cid: "default".to_string(),
+            cid: "test-company-id-12345".to_string(),
             kind: "local_newer".to_string(),
             item: "local_item".to_string(),
             data: "local_data".to_string(),
@@ -161,7 +165,7 @@ mod sync_client_tests {
         let older_remote = testtbItem {
             id: local_item.id.clone(),
             idpk: 0,
-            cid: "default".to_string(),
+            cid: "test-company-id-12345".to_string(),
             kind: "remote_older".to_string(),
             item: "remote_item".to_string(),
             data: "remote_data".to_string(),
@@ -178,7 +182,7 @@ mod sync_client_tests {
         let newer_remote = testtbItem {
             id: local_item.id.clone(),
             idpk: 0,
-            cid: "default".to_string(),
+            cid: "test-company-id-12345".to_string(),
             kind: "remote_newer".to_string(),
             item: "newer_remote_item".to_string(),
             data: "newer_remote_data".to_string(),
