@@ -1,41 +1,50 @@
 //! API 响应格式 - 统一响应结构
+//!
+//! 对应 koa78-base78 的响应格式: { res, errmsg, kind, back }
 
 use serde::{Deserialize, Serialize};
 use axum::{
     http::StatusCode,
     Json,
 };
+use serde_json::Value;
 
 /// 统一 API 响应格式
 ///
-/// 对应 koa78-base78 的响应格式: { res, errmsg, data }
+/// 对应 koa78-base78 的响应格式: { res, errmsg, kind, back }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiResponse<T> {
+pub struct ApiResponse {
     /// 结果码: 0 成功, 负数失败
     pub res: i32,
     /// 错误信息
+    #[serde(default)]
     pub errmsg: String,
+    /// 返回类型
+    #[serde(default)]
+    pub kind: String,
     /// 响应数据
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<T>,
+    pub back: Option<Value>,
 }
 
-impl<T: Serialize> ApiResponse<T> {
+impl ApiResponse {
     /// 成功响应
-    pub fn success(data: T) -> Self {
+    pub fn success(data: Value) -> Self {
         Self {
             res: 0,
             errmsg: String::new(),
-            data: Some(data),
+            kind: String::new(),
+            back: Some(data),
         }
     }
 
     /// 成功响应 (无数据)
-    pub fn ok() -> ApiResponse<()> {
-        ApiResponse {
+    pub fn ok() -> Self {
+        Self {
             res: 0,
             errmsg: String::new(),
-            data: None,
+            kind: String::new(),
+            back: None,
         }
     }
 
@@ -44,7 +53,8 @@ impl<T: Serialize> ApiResponse<T> {
         Self {
             res: code,
             errmsg: errmsg.to_string(),
-            data: None,
+            kind: String::new(),
+            back: None,
         }
     }
 
@@ -106,22 +116,22 @@ mod tests {
 
     #[test]
     fn test_api_response_success() {
-        let resp = ApiResponse::success("test data");
+        let resp = ApiResponse::success(serde_json::json!({"id": "123"}));
         assert_eq!(resp.res, 0);
         assert!(resp.errmsg.is_empty());
-        assert_eq!(resp.data, Some("test data"));
+        assert!(resp.back.is_some());
     }
 
     #[test]
     fn test_api_response_ok() {
-        let resp = ApiResponse::<()>::ok();
+        let resp = ApiResponse::ok();
         assert_eq!(resp.res, 0);
-        assert!(resp.data.is_none());
+        assert!(resp.back.is_none());
     }
 
     #[test]
     fn test_api_response_fail() {
-        let resp = ApiResponse::<()>::fail("error msg", -1);
+        let resp = ApiResponse::fail("error msg", -1);
         assert_eq!(resp.res, -1);
         assert_eq!(resp.errmsg, "error msg");
     }
