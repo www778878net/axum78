@@ -49,6 +49,8 @@ pub struct SynclogItem {
     pub cmdtextmd5: String,
     #[prost(string, tag = "13")]
     pub cid: String,
+    #[prost(string, tag = "14")]
+    pub upby: String,
 }
 
 /// synclog 批量数据
@@ -137,7 +139,7 @@ async fn m_add_many(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
 
         let id = if item.id.is_empty() { uuid::Uuid::new_v4().to_string() } else { item.id.clone() };
         
-        let sql = "INSERT INTO synclog (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, cmdtextmd5, cid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)";
+        let sql = "INSERT INTO synclog (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, cmdtextmd5, cid, upby) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)";
         
         let _ = db.do_m_add(
             sql,
@@ -154,6 +156,7 @@ async fn m_add_many(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
                 &item.worker,
                 &item.cmdtextmd5,
                 &expected_cid,
+                &item.upby,
             ],
             up,
         );
@@ -203,8 +206,12 @@ async fn do_work(db: &Sqlite78) -> (StatusCode, Bytes) {
                 }
             };
             let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-            let result = process_synclog_item(db, &up, &tbname, &action, &params_str, &idrow);
+            let upby = row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            
+            let mut up_with_upby = up.clone();
+            up_with_upby.upby = upby;
+            
+            let result = process_synclog_item(db, &up_with_upby, &tbname, &action, &params_str, &idrow);
             
             let (synced, lasterr) = match result {
                 Ok(_) => (1, String::new()),
@@ -278,6 +285,7 @@ async fn get(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
             synced: row.get("synced").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
             cmdtextmd5: row.get("cmdtextmd5").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            upby: row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         })
         .collect();
 

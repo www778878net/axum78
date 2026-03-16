@@ -4,9 +4,9 @@
 //! 1. 单向下载测试：清空表testtb，服务器数据下载到本地
 //! 2. 客户端变更同步：添加2条、修改2条、删除2条，上传synclog，预期服务器一致
 //! 3. 服务器变更同步：服务器添加/修改/删除各2条，预期客户端同步后一致
-//! 4. 冲突测试
+//! 4. 最后客户端和服务器testtb表一致
 
-use base::{UpInfo};
+use base::{next_id_string, UpInfo};
 use base64::Engine;
 use database::Sqlite78;
 use prost::Message;
@@ -55,13 +55,15 @@ pub struct SynclogItem {
     pub idrow: String,
     #[prost(string, tag = "10")]
     pub worker: String,
-            #[prost(int32, tag = "11")]
+    #[prost(int32, tag = "11")]
     pub synced: i32,
-            #[prost(string, tag = "12")]
-            pub cmdtextmd5: String,
-            #[prost(string, tag = "13")]
-            pub cid: String,
-        }
+    #[prost(string, tag = "12")]
+    pub cmdtextmd5: String,
+    #[prost(string, tag = "13")]
+    pub cid: String,
+    #[prost(string, tag = "14")]
+    pub upby: String,
+}
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SynclogBatch {
@@ -182,7 +184,6 @@ async fn upload_synclog(sid: &str, items: Vec<SynclogItem>) -> Result<i32, Strin
         return Err(json.get("errmsg").and_then(|v| v.as_str()).unwrap_or("未知错误").to_string());
     }
     
-    // jsdata是 JSON字符串，需要解析
     let jsdata_str = json.get("jsdata").and_then(|v| v.as_str()).unwrap_or_default();
     let jsdata: serde_json::Value = serde_json::from_str(jsdata_str).unwrap_or_default();
     Ok(jsdata.get("batches").and_then(|v| v.as_i64()).unwrap_or(0) as i32)
@@ -246,12 +247,12 @@ async fn test_all_plans() {
     // ===== 方案1: 单向下载测试 =====
     println!("\n========== 方案1: 单向下载测试 ==========");
     
-    // 服务器插入5条数据
+    // 服务器插入5条数据（使用datetime('now')设置uptime）
     for i in 0..5 {
-        let id = uuid::Uuid::new_v4().to_string();
-        let sql = "INSERT INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)";
-        let _ = server_db.do_m(sql, &[&id as &dyn rusqlite::ToSql, &CID, &format!("server_kind_{}", i), &format!("server_item_{}", i), &format!("server_data_{}", i)], &up);
-        println!("服务器插入: {} -> id={}", i, &id[..8]);
+        let id = next_id_string();
+        let sql = "INSERT INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))";
+        let _ = server_db.do_m(sql, &[&id as &dyn rusqlite::ToSql, &CID, &format!("server_kind_{}", i), &format!("server_item_{}", i), &format!("server_data_{}", i), &"testtb"], &up);
+        println!("服务器插入: {} -> id={}", i, &id);
     }
     
     let server_count = count_testtb(&server_db);
@@ -263,8 +264,8 @@ async fn test_all_plans() {
     println!("下载到 {} 条记录", items.len());
     
     for item in &items {
-        let sql = "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)";
-        let _ = client_db.do_m(sql, &[&item.id as &dyn rusqlite::ToSql, &item.cid, &item.kind, &item.item, &item.data], &up);
+        let sql = "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))";
+        let _ = client_db.do_m(sql, &[&item.id as &dyn rusqlite::ToSql, &item.cid, &item.kind, &item.item, &item.data, &"client"], &up);
     }
     
     let client_count = count_testtb(&client_db);
@@ -284,46 +285,48 @@ async fn test_all_plans() {
     
     // 添加2条
     for i in 0..2 {
-        let id = uuid::Uuid::new_v4().to_string();
-        let sql = "INSERT INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)";
-        let _ = client_db.do_m(sql, &[&id as &dyn rusqlite::ToSql, &CID, &format!("add_kind_{}", i), &format!("add_item_{}", i), &format!("add_data_{}", i)], &up);
+        let id = next_id_string();
+        let sql = "INSERT INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))";
+        let _ = client_db.do_m(sql, &[&id as &dyn rusqlite::ToSql, &CID, &format!("add_kind_{}", i), &format!("add_item_{}", i), &format!("add_data_{}", i), &WORKER_A], &up);
         
         synclog_items.push(SynclogItem {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id_string(),
             apisys: "v1".to_string(),
             apimicro: "iflow".to_string(),
             apiobj: "synclog".to_string(),
             tbname: "testtb".to_string(),
             action: "insert".to_string(),
-            cmdtext: "INSERT INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)".to_string(),
+            cmdtext: String::new(),
             params: serde_json::to_string(&[&id, CID, &format!("add_kind_{}", i), &format!("add_item_{}", i), &format!("add_data_{}", i)]).unwrap_or_default(),
             idrow: id.clone(),
             worker: WORKER_A.to_string(),
             synced: 0,
             cmdtextmd5: String::new(),
             cid: CID.to_string(),
+            upby: WORKER_A.to_string(),
         });
     }
     println!("客户端添加2条");
     
-    // 修改2条
-    let sql = "UPDATE testtb SET kind = ?, item = ?, data = ? WHERE id = ?";
-    let _ = client_db.do_m(sql, &[&"updated_kind" as &dyn rusqlite::ToSql, &"updated_item", &"updated_data", &id_for_update], &up);
+    // 修改1条
+    let sql = "UPDATE testtb SET kind = ?, item = ?, data = ?, upby = ?, uptime = datetime('now') WHERE id = ?";
+    let _ = client_db.do_m(sql, &[&"updated_kind" as &dyn rusqlite::ToSql, &"updated_item", &"updated_data", &WORKER_A, &id_for_update], &up);
     
     synclog_items.push(SynclogItem {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: next_id_string(),
         apisys: "v1".to_string(),
         apimicro: "iflow".to_string(),
         apiobj: "synclog".to_string(),
         tbname: "testtb".to_string(),
         action: "update".to_string(),
-        cmdtext: "UPDATE testtb SET kind = ?, item = ?, data = ? WHERE id = ?".to_string(),
+        cmdtext: String::new(),
         params: serde_json::to_string(&["updated_kind", "updated_item", "updated_data", &id_for_update]).unwrap_or_default(),
         idrow: id_for_update.clone(),
         worker: WORKER_A.to_string(),
         synced: 0,
         cmdtextmd5: String::new(),
         cid: CID.to_string(),
+        upby: WORKER_A.to_string(),
     });
     println!("客户端修改1条");
     
@@ -332,19 +335,20 @@ async fn test_all_plans() {
     let _ = client_db.do_m(sql, &[&id_for_delete as &dyn rusqlite::ToSql], &up);
     
     synclog_items.push(SynclogItem {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: next_id_string(),
         apisys: "v1".to_string(),
         apimicro: "iflow".to_string(),
         apiobj: "synclog".to_string(),
         tbname: "testtb".to_string(),
         action: "delete".to_string(),
-        cmdtext: "DELETE FROM testtb WHERE id = ?".to_string(),
+        cmdtext: String::new(),
         params: serde_json::to_string(&[&id_for_delete]).unwrap_or_default(),
         idrow: id_for_delete.clone(),
         worker: WORKER_A.to_string(),
         synced: 0,
         cmdtextmd5: String::new(),
         cid: CID.to_string(),
+        upby: WORKER_A.to_string(),
     });
     println!("客户端删除1条");
     
@@ -373,22 +377,23 @@ async fn test_all_plans() {
     // 服务器添加2条 (通过worker-B上传synclog，然后doWork执行)
     let mut synclog_items_b: Vec<SynclogItem> = Vec::new();
     for i in 0..2 {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = next_id_string();
         
         synclog_items_b.push(SynclogItem {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_id_string(),
             apisys: "v1".to_string(),
             apimicro: "iflow".to_string(),
             apiobj: "synclog".to_string(),
             tbname: "testtb".to_string(),
             action: "insert".to_string(),
-            cmdtext: "INSERT INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)".to_string(),
+            cmdtext: String::new(),
             params: serde_json::to_string(&[&id, CID, &format!("server_add_kind_{}", i), &format!("server_add_item_{}", i), &format!("server_add_data_{}", i)]).unwrap_or_default(),
             idrow: id.clone(),
             worker: WORKER_B.to_string(),
             synced: 0,
             cmdtextmd5: String::new(),
             cid: CID.to_string(),
+            upby: WORKER_B.to_string(),
         });
     }
     println!("服务器添加2条");
@@ -418,17 +423,11 @@ async fn test_all_plans() {
         panic!("下载synclog失败: {:?}", json.get("errmsg"));
     }
     
-    // 打印原始响应
-    println!("服务器响应: {:?}", json);
-    
     // jsdata是JSON字符串，里面包含bytedata(base64编码)
     let jsdata_str = json.get("jsdata").and_then(|v| v.as_str()).expect("无jsdata");
-    println!("jsdata字符串: {}", jsdata_str);
     let jsdata: serde_json::Value = serde_json::from_str(jsdata_str).expect("解析jsdata失败");
     let bytedata_base64 = jsdata.get("bytedata").and_then(|v| v.as_str()).expect("无bytedata");
-    println!("bytedata_base64长度: {}", bytedata_base64.len());
     let bytes = base64::engine::general_purpose::STANDARD.decode(bytedata_base64.as_bytes()).expect("Base64解码失败");
-    println!("解码后字节长度: {}", bytes.len());
     let synclog_batch = SynclogBatch::decode(&*bytes).expect("解码失败");
     
     println!("下载到 {} 条synclog", synclog_batch.items.len());
@@ -439,22 +438,22 @@ async fn test_all_plans() {
         println!("执行: action={}, params={:?}", item.action, params);
         match item.action.as_str() {
             "insert" => {
-                let sql = "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)";
+                let sql = "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))";
                 let p0 = params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let p1 = params.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let p2 = params.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let p3 = params.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let p4 = params.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let result = client_db.do_m(sql, &[&p0 as &dyn rusqlite::ToSql, &p1, &p2, &p3, &p4], &up);
+                let result = client_db.do_m(sql, &[&p0 as &dyn rusqlite::ToSql, &p1, &p2, &p3, &p4, &WORKER_A], &up);
                 println!("INSERT结果: {:?}, id={}", result, p0);
             }
             "update" => {
-                let sql = "UPDATE testtb SET kind = ?, item = ?, data = ? WHERE id = ?";
+                let sql = "UPDATE testtb SET kind = ?, item = ?, data = ?, upby = ?, uptime = datetime('now') WHERE id = ?";
                 let p0 = params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let p1 = params.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let p2 = params.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let p3 = params.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let _ = client_db.do_m(sql, &[&p0 as &dyn rusqlite::ToSql, &p1, &p2, &p3], &up);
+                let _ = client_db.do_m(sql, &[&p0 as &dyn rusqlite::ToSql, &p1, &p2, &WORKER_A, &p3], &up);
             }
             "delete" => {
                 let sql = "DELETE FROM testtb WHERE id = ?";
@@ -471,6 +470,26 @@ async fn test_all_plans() {
     println!("服务器记录数: {}", server_count);
     assert_eq!(client_count, server_count);
     println!("✅ 方案3通过");
+    
+    // 验证upby/uptime字段
+    println!("\n========== 验证upby/uptime字段 ==========");
+    let server_rows = server_db.do_get("SELECT id, kind, upby, uptime FROM testtb LIMIT 3", &[], &up).unwrap_or_default();
+    for row in &server_rows {
+        let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let upby = row.get("upby").and_then(|v| v.as_str()).unwrap_or("");
+        let uptime = row.get("uptime").and_then(|v| v.as_str()).unwrap_or("");
+        println!("服务器: id={}, kind={}, upby={}, uptime={}", &id[..8.min(id.len())], kind, upby, uptime);
+    }
+    
+    let client_rows = client_db.do_get("SELECT id, kind, upby, uptime FROM testtb LIMIT 3", &[], &up).unwrap_or_default();
+    for row in &client_rows {
+        let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let upby = row.get("upby").and_then(|v| v.as_str()).unwrap_or("");
+        let uptime = row.get("uptime").and_then(|v| v.as_str()).unwrap_or("");
+        println!("客户端: id={}, kind={}, upby={}, uptime={}", &id[..8.min(id.len())], kind, upby, uptime);
+    }
     
     println!("\n========== 所有测试通过 ==========");
 }
