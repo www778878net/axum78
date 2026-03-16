@@ -10,9 +10,9 @@ pub mod response;
 pub mod base_api;
 pub mod router;
 pub mod server;
-
-pub mod apitest;
-pub mod apisvc;
+pub mod proto;
+pub mod sync;
+pub mod apigame;
 
 pub use context::{UpInfo, RequestBody, Context};
 pub use response::{ApiResponse, ApiError};
