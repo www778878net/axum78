@@ -3,8 +3,10 @@
 //! 路径: apisvc/backsvc/synclog
 //! 路由: POST /apisvc/backsvc/synclog/:apifun
 //!
-//! 参考 LOGSVC 实现
-//! API函数不需要参数，通过up访问数据，db从框架获取
+//! 多端分布式同步：
+//! - 客户端和服务端使用同一个 synclog 表
+//! - 通过 worker 字段区分不同客户端
+//! - 下载时只获取 worker != 本地的记录
 
 use axum::{
     body::Bytes,
@@ -17,22 +19,34 @@ use serde::{Deserialize, Serialize};
 
 // ============ Proto定义 ============
 
-/// synclog 单项记录
+/// synclog 单项记录（与服务器端一致）
 #[derive(Clone, PartialEq, Message, Serialize, Deserialize)]
 pub struct SynclogItem {
     #[prost(string, tag = "1")]
     pub id: String,
     #[prost(string, tag = "2")]
-    pub tbname: String,
+    pub apisys: String,
     #[prost(string, tag = "3")]
-    pub action: String,
+    pub apimicro: String,
     #[prost(string, tag = "4")]
-    pub cmdtext: String,
+    pub apiobj: String,
     #[prost(string, tag = "5")]
-    pub params: String,
+    pub tbname: String,
     #[prost(string, tag = "6")]
-    pub idrow: String,
+    pub action: String,
     #[prost(string, tag = "7")]
+    pub cmdtext: String,
+    #[prost(string, tag = "8")]
+    pub params: String,
+    #[prost(string, tag = "9")]
+    pub idrow: String,
+    #[prost(string, tag = "10")]
+    pub worker: String,
+    #[prost(int32, tag = "11")]
+    pub synced: i32,
+    #[prost(string, tag = "12")]
+    pub cmdtextmd5: String,
+    #[prost(string, tag = "13")]
     pub cid: String,
 }
 
@@ -59,6 +73,7 @@ pub async fn handle(apifun: &str, up: UpInfo, db: &Sqlite78) -> (StatusCode, Byt
     match apifun.to_lowercase().as_str() {
         "maddmany" => m_add_many(&up, db).await,
         "dowork" => do_work(db).await,
+        "get" => get(&up, db).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
@@ -86,8 +101,28 @@ async fn m_add_many(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
             }
         },
         None => {
-            let resp = Response::fail("无同步数据", -1);
-            return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+            match &up.jsdata {
+                Some(jsdata) => {
+                    use base64::{Engine as _, engine::general_purpose};
+                    match general_purpose::STANDARD.decode(jsdata) {
+                        Ok(bytes) => match SynclogBatch::decode(&*bytes) {
+                            Ok(b) => b,
+                            Err(_) => {
+                                let resp = Response::fail("解码同步数据失败", -1);
+                                return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+                            }
+                        },
+                        Err(_) => {
+                            let resp = Response::fail("Base64解码失败", -1);
+                            return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+                        }
+                    }
+                },
+                None => {
+                    let resp = Response::fail("无同步数据", -1);
+                    return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+                }
+            }
         }
     };
 
@@ -101,17 +136,22 @@ async fn m_add_many(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
 
         let id = if item.id.is_empty() { uuid::Uuid::new_v4().to_string() } else { item.id.clone() };
         
-        let sql = "INSERT INTO synclog (id, tbname, action, cmdtext, params, idrow, cid, synced) VALUES (?, ?, ?, ?, ?, ?, ?, 0)";
+        let sql = "INSERT INTO synclog (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, cmdtextmd5, cid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)";
         
         let _ = db.do_m_add(
             sql,
             &[
                 &id as &dyn rusqlite::ToSql,
+                &item.apisys,
+                &item.apimicro,
+                &item.apiobj,
                 &item.tbname,
                 &item.action,
                 &item.cmdtext,
                 &item.params,
                 &item.idrow,
+                &item.worker,
+                &item.cmdtextmd5,
                 &expected_cid,
             ],
             up,
@@ -184,19 +224,73 @@ async fn do_work(db: &Sqlite78) -> (StatusCode, Bytes) {
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
+/// get - 下载同步记录（获取其他worker的变更）
+async fn get(up: &UpInfo, db: &Sqlite78) -> (StatusCode, Bytes) {
+    let worker = if up.sid.is_empty() {
+        let resp = Response::fail("无效的SID", -1);
+        return (StatusCode::UNAUTHORIZED, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    } else if up.sid.contains('|') {
+        up.sid.split('|').last().unwrap_or(&up.sid).to_string()
+    } else {
+        up.sid.clone()
+    };
+
+    ensure_synclog_table(db);
+
+    let rows = match db.do_get(
+        "SELECT * FROM synclog WHERE worker != ? AND synced = 1 ORDER BY idpk ASC LIMIT ?",
+        &[&worker as &dyn rusqlite::ToSql, &up.getnumber as &dyn rusqlite::ToSql],
+        up,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            let resp = Response::fail(&format!("查询失败: {}", e), -1);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+        }
+    };
+
+    let items: Vec<SynclogItem> = rows
+        .iter()
+        .map(|row| SynclogItem {
+            id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            apisys: row.get("apisys").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            apimicro: row.get("apimicro").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            apiobj: row.get("apiobj").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            tbname: row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            action: row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            cmdtext: row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            params: row.get("params").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            idrow: row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            worker: row.get("worker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            synced: row.get("synced").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            cmdtextmd5: row.get("cmdtextmd5").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        })
+        .collect();
+
+    let result = SynclogBatch { items };
+    let resp = Response::success_bytes(result.encode_to_vec());
+    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+}
+
 fn ensure_synclog_table(db: &Sqlite78) {
     let up = UpInfo::new();
     let sql = r#"CREATE TABLE IF NOT EXISTS synclog (
         idpk INTEGER PRIMARY KEY AUTOINCREMENT,
         id TEXT NOT NULL UNIQUE,
+        apisys TEXT NOT NULL DEFAULT 'v1',
+        apimicro TEXT NOT NULL DEFAULT 'iflow',
+        apiobj TEXT NOT NULL DEFAULT 'synclog',
         tbname TEXT NOT NULL DEFAULT '',
         action TEXT NOT NULL DEFAULT '',
         cmdtext TEXT NOT NULL DEFAULT '',
         params TEXT NOT NULL DEFAULT '[]',
         idrow TEXT NOT NULL DEFAULT '',
-        cid TEXT NOT NULL DEFAULT '',
+        worker TEXT NOT NULL DEFAULT '',
         synced INTEGER NOT NULL DEFAULT 0,
         lasterrinfo TEXT NOT NULL DEFAULT '',
+        cmdtextmd5 TEXT NOT NULL DEFAULT '',
+        cid TEXT NOT NULL DEFAULT '',
         upby TEXT NOT NULL DEFAULT '',
         uptime TEXT NOT NULL DEFAULT ''
     )"#;
