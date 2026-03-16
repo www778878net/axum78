@@ -11,11 +11,9 @@ mod doc_test_plan {
     use crate::proto::testtbItem;
     use crate::sync::DataSync;
     use database::Sqlite78;
-    use std::sync::Mutex;
+    use serial_test::serial;
 
     const SERVER_DB: &str = "tmp/data/remote.db";
-
-    static LOCK: Mutex<()> = Mutex::new(());
 
     fn get_server_sync() -> DataSync {
         DataSync::with_remote_db(SERVER_DB)
@@ -35,9 +33,8 @@ mod doc_test_plan {
     /// 测试方案1: 单向下载测试
     /// 先清空表testtb，然后服务器上的几条预期会下载到本地
     #[test]
+    #[serial]
     fn test_plan_1_download() {
-        let _guard = LOCK.lock().unwrap();
-
         let server_sync = get_server_sync();
         server_sync.ensure_table().expect("建表失败");
         clear_all(&server_sync);
@@ -88,9 +85,8 @@ mod doc_test_plan {
 
     /// 测试方案2: 添加2条、修改2条、删除2条，上传到服务器
     #[test]
+    #[serial]
     fn test_plan_2_upload() {
-        let _guard = LOCK.lock().unwrap();
-
         let server_sync = get_server_sync();
         server_sync.ensure_table().expect("建表失败");
         clear_all(&server_sync);
@@ -204,9 +200,8 @@ mod doc_test_plan {
 
     /// 测试方案3: 服务器添加修改，自动同步到客户端
     #[test]
+    #[serial]
     fn test_plan_3_server_changes() {
-        let _guard = LOCK.lock().unwrap();
-
         let server_sync = get_server_sync();
         server_sync.ensure_table().expect("建表失败");
         clear_all(&server_sync);
@@ -254,11 +249,15 @@ mod doc_test_plan {
 
         println!("服务器添加2条");
 
-        // 服务器修改2条
-        let records = server_sync.get_items().expect("查询失败");
-        if records.len() >= 2 {
+        // 服务器修改2条（修改初始数据，不是刚添加的数据）
+        let init_records: Vec<_> = server_sync.get_items().expect("查询失败")
+            .into_iter()
+            .filter(|r| r.kind.starts_with("kind_"))
+            .collect();
+        
+        if init_records.len() >= 2 {
             let update1 = testtbItem {
-                id: records[0].id.clone(),
+                id: init_records[0].id.clone(),
                 idpk: 0,
                 cid: "default".to_string(),
                 kind: "server_updated_kind_0".to_string(),
@@ -270,7 +269,7 @@ mod doc_test_plan {
             server_sync.apply_remote_update(&update1).expect("修改失败");
 
             let update2 = testtbItem {
-                id: records[1].id.clone(),
+                id: init_records[1].id.clone(),
                 idpk: 0,
                 cid: "default".to_string(),
                 kind: "server_updated_kind_1".to_string(),
@@ -291,7 +290,6 @@ mod doc_test_plan {
         }
 
         let client_records = client_sync.get_items().expect("查询失败");
-        println!("客户端记录数: {}", client_records.len());
         assert_eq!(client_records.len(), server_records.len());
         assert!(client_records.iter().any(|r| r.kind == "server_add_kind_1"));
 
@@ -300,9 +298,8 @@ mod doc_test_plan {
 
     /// 测试方案4: 冲突测试
     #[test]
+    #[serial]
     fn test_plan_4_conflict() {
-        let _guard = LOCK.lock().unwrap();
-
         let server_sync = get_server_sync();
         server_sync.ensure_table().expect("建表失败");
         clear_all(&server_sync);

@@ -1,0 +1,19 @@
+/target
+Cargo.lock
+*.log
+
+# 编译产物（已用 LFS 管理）
+# libs/ 目录通过 .gitattributes 用 LFS 追踪
+/tmp/
+crates/database/tmp/
+memory78/memory78.db
+*-wal
+*-shm
+*-journal
+
+# Worker 配置（每台机器不同）
+docs/config/worker.txt
+node_modules/
+tmp/tmp/
+.trae/
+demo/
