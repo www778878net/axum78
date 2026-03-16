@@ -195,7 +195,13 @@ async fn do_work(db: &Sqlite78) -> (StatusCode, Bytes) {
             let idpk = row.get("idpk").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let tbname = row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let params_str = row.get("params").and_then(|v| v.as_str()).unwrap_or("[]").to_string();
+            let params_str = {
+                match row.get("params") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v @ Value::Array(_)) | Some(v @ Value::Object(_)) => serde_json::to_string(v).unwrap_or_default(),
+                    _ => "[]".to_string(),
+                }
+            };
             let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
             let result = process_synclog_item(db, &up, &tbname, &action, &params_str, &idrow);
@@ -347,9 +353,13 @@ fn process_synclog_item(
 
             let new_id = if id.is_empty() { uuid::Uuid::new_v4().to_string() } else { id.to_string() };
             
+            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S");
+            let upby = up.upby.clone();
+            let uptime = now.to_string();
+            
             db.do_m(
-                "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data) VALUES (?, ?, ?, ?, ?)",
-                &[&new_id as &dyn rusqlite::ToSql, &cid, &kind, &item, &data],
+                "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                &[&new_id as &dyn rusqlite::ToSql, &cid, &kind, &item, &data, &upby, &uptime],
                 up,
             ).map(|_| ()).map_err(|e| e)
         }
