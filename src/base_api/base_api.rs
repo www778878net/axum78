@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::{Context, ApiError};
+use crate::{UpInfo as ApiUpInfo, ApiError};
 use database::Sqlite78;
 use base::UpInfo;
 
@@ -42,8 +42,8 @@ pub trait BaseApi: Send + Sync + 'static {
     /// 获取数据库连接
     fn db(&self) -> &Sqlite78;
 
-    /// 获取上下文
-    fn context(&self) -> &Context;
+    /// 获取上下文 (UpInfo)
+    fn context(&self) -> &ApiUpInfo;
 
     /// 创建 UpInfo (用于数据库操作)
     fn create_up_info(&self) -> UpInfo {
@@ -125,7 +125,7 @@ pub trait BaseApi: Send + Sync + 'static {
         let obj = json.as_object().ok_or_else(|| ApiError::new("无效的实体格式", -2))?;
 
         // 构建插入 SQL
-        let id = Context::new_id();
+        let id = ApiUpInfo::new_id();
         let cols: Vec<String> = config.cols.iter()
             .filter(|c| obj.contains_key(*c))
             .cloned()

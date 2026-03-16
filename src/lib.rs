@@ -1,51 +1,31 @@
 //! axum78 - 基于 axum 的快速 Web API 框架
 //!
-//! 目标：通过实现 BaseApi trait 快速定义表的 CRUD API
+//! 参考 koa78-base78 的 4 级路由架构: /:apisys/:apimicro/:apiobj/:apifun
 //!
 //! # 示例
 //!
 //! ```rust,ignore
-//! use axum78::{BaseApi, ApiRouter, TableConfig, Context, ApiError};
-//! use serde::{Deserialize, Serialize};
-//! use database::Sqlite78;
-//! use async_trait::async_trait;
+//! use axum78::{UpInfo, RequestBody, ApiResponse, ApiRouter78};
+//! use serde_json::Value;
 //!
-//! // 1. 定义表实体
-//! #[derive(Serialize, Deserialize, Clone)]
-//! pub struct Testtb {
-//!     pub kind: String,
-//!     pub item: String,
-//!     pub data: String,
-//! }
-//!
-//! // 2. 实现 BaseApi trait
-//! pub struct TesttbApi {
-//!     db: Sqlite78,
-//!     ctx: Context,
-//! }
+//! // 1. 定义控制器
+//! struct MyController;
 //!
 //! #[async_trait]
-//! impl BaseApi for TesttbApi {
-//!     type Entity = Testtb;
-//!
-//!     fn config(&self) -> &TableConfig {
-//!         static CONFIG: TableConfig = TableConfig {
-//!             tbname: "testtb",
-//!             id_field: "id",
-//!             idpk_field: "idpk",
-//!             uidcid: "cid",
-//!             cols: vec!["kind".into(), "item".into(), "data".into()],
-//!         };
-//!         &CONFIG
+//! impl Controller78 for MyController {
+//!     async fn call(&self, up: &mut UpInfo, fun: &str) -> Value {
+//!         match fun {
+//!             "get" => { /* ... */ }
+//!             "mAdd" => { /* ... */ }
+//!             _ => Value::Null
+//!         }
 //!     }
-//!
-//!     fn db(&self) -> &Sqlite78 { &self.db }
-//!     fn context(&self) -> &Context { &self.ctx }
 //! }
 //!
-//! // 3. 注册路由
-//! let router = ApiRouter::new().register(TesttbApi { db, ctx });
-//! // 自动生成路由: GET/POST /api/testtb, GET/PUT/DELETE /api/testtb/{id}
+//! // 2. 注册路由
+//! let router = ApiRouter78::new()
+//!     .register("apitest/testmenu/testtb", MyController)
+//!     .build();
 //! ```
 
 pub mod context;
@@ -57,10 +37,10 @@ pub mod proto;
 pub mod sync;
 
 // 重导出常用类型
-pub use context::Context;
+pub use context::{UpInfo, RequestBody, Context};
 pub use response::{ApiResponse, ApiError};
 pub use base_api::{BaseApi, TableConfig};
-pub use router::ApiRouter;
+pub use router::{ApiRouter, ApiRouter78, Controller78};
 pub use server::Server;
 pub use sync::{DataSync, SyncConfig, SyncResult};
 
