@@ -224,20 +224,39 @@ async fn do_work() -> Result<(i32, i32), String> {
 #[tokio::test]
 async fn test_all_plans() {
     println!("\n========== 多端同步测试 ==========");
-    
+
     let sid = format!("{}|{}", CID, WORKER_A);
     let _up = UpInfo::new();
-    
+
+    // 初始化默认数据库中的 lovers 和 lovers_auth 表（用于 SID 验证）
+    let default_db = database::LocalDB::default_instance().expect("获取默认数据库失败");
+    let _ = default_db.execute(axum78::LOVERS_CREATE_SQL);
+    let _ = default_db.execute(axum78::LOVERS_AUTH_CREATE_SQL);
+
+    // 插入测试用户
+    let test_user_id = database::next_id_string();
+    let _ = default_db.execute_with_params(
+        "INSERT OR REPLACE INTO lovers (id, uname, idcodef, cid, uid) VALUES (?, ?, ?, ?, ?)",
+        &[&test_user_id as &dyn rusqlite::ToSql, &"test_user", &CID, &CID, &"test_uid"],
+    );
+
+    // 插入测试会话（SID 格式: CID|worker）
+    let _ = default_db.execute_with_params(
+        "INSERT OR REPLACE INTO lovers_auth (ikuser, sid) VALUES ((SELECT idpk FROM lovers WHERE id = ?), ?)",
+        &[&test_user_id as &dyn rusqlite::ToSql, &sid],
+    );
+    println!("默认数据库: 已初始化 lovers 和 lovers_auth 表");
+
     // 远程数据库路径（服务器端）
     let remote_db_path = "c:\\7788\\rustdemo\\rustdemo\\crates\\axum78\\tmp\\data\\remote.db";
-    
+
     // 删除旧表并重新创建（远程数据库）
     let remote_testtb = TestTb::with_db_path(remote_db_path);
     let _ = remote_testtb.db.execute("DROP TABLE IF EXISTS testtb");
     let _ = remote_testtb.db.execute("DELETE FROM synclog WHERE tbname='testtb'");
     let _ = remote_testtb.db.execute(database::datastate::TESTTB_CREATE_SQL);
     println!("远程数据库: 已重建testtb表");
-    
+
     // 删除旧表并重新创建（本地数据库）
     // 使用 with_db_path 方法，避免使用单例模式
     let local_db_path = "c:\\7788\\rustdemo\\rustdemo\\docs\\config\\local.db";
@@ -248,7 +267,32 @@ async fn test_all_plans() {
     println!("本地数据库: 已重建testtb表");
     
     // 启动服务器（服务器端使用远程数据库路径）
-    let app = axum78::create_router().into_make_service();
+    use std::sync::Arc;
+    use axum78::AppState;
+    use tower_http::cors::{CorsLayer, Any};
+    use axum::middleware;
+    use axum78::sid_auth_middleware;
+
+    let state = Arc::new(AppState::new());
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]);
+
+    let app = axum::Router::new()
+        .route("/:apisys/:apimicro/:apiobj/:apifun", axum::routing::any(
+            |axum::extract::Path((apisys, apimicro, apiobj, apifun)): axum::extract::Path<(String, String, String, String)>,
+             axum::extract::Extension(verify_result): axum::extract::Extension<axum78::VerifyResult>,
+             axum::extract::Extension(up): axum::extract::Extension<axum78::UpInfo>| async move {
+                let (status, resp) = axum78::apisvc::backsvc::synclog::handle(&apifun.to_lowercase(), up).await;
+                (status, [(axum::http::header::CONTENT_TYPE, "application/json")], resp)
+            }
+        ))
+        .layer(middleware::from_fn(sid_auth_middleware))
+        .route("/health", axum::routing::get(|| async { "OK" }))
+        .with_state(state)
+        .layer(cors);
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3780").await.expect("绑定端口失败");
     let _server_handle = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("服务器启动失败");

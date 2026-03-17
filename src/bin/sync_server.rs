@@ -4,15 +4,21 @@
 //!
 //! 同步机制: 上传synclog记录 -> doWork执行实际操作
 
-use axum78::create_router;
+use std::sync::Arc;
+use axum78::AppState;
+use axum::Router;
 
 #[tokio::main]
 async fn main() {
-    let app = create_router();
+    let state = Arc::new(AppState::new());
+    let app = Router::new()
+        .route("/health", axum::routing::get(|| async { "OK" }))
+        .with_state(state);
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3780").await.expect("绑定端口失败");
-    
+
     tracing_subscriber::fmt::init();
-    
+
     tracing::info!("同步服务器启动: http://127.0.0.1:3780");
     tracing::info!("端点:");
     tracing::info!("  POST /:apisys/:apimicro/:apiobj/:apifun - 4级路由API");
