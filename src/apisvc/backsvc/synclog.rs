@@ -156,7 +156,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
     ensure_testtb_table(db);
 
     // 先检查synclog表中有多少条记录
-    let count_rows = match db.query("SELECT COUNT(*) as cnt FROM synclog", &[]) {
+    let count_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog", &[]) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询synclog表失败: {}", e), -1);
@@ -166,7 +166,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
     let total_count = count_rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()).unwrap_or(0);
     
     // 检查synced=0的记录数
-    let pending_rows = match db.query("SELECT COUNT(*) as cnt FROM synclog WHERE synced = 0", &[]) {
+    let pending_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog WHERE synced = 0", &[]) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询pending记录失败: {}", e), -1);
@@ -183,7 +183,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
     let mut batch_count = 0i32;
 
     for _ in 0..max_batches {
-        let rows = match db.query(
+        let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
             "SELECT * FROM synclog WHERE synced = 0 ORDER BY idpk ASC LIMIT ?",
             &[&limit as &dyn rusqlite::ToSql],
         ) {
@@ -211,7 +211,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
             let params_str = {
                 match row.get("params") {
                     Some(Value::String(s)) => s.clone(),
-                    Some(v @ Value::Array(_)) => serde_json::to_string(v).unwrap_or_default(),
+                    Some(v @ Value::Array(_)) => serde_json::to_string(&v).unwrap_or_default(),
                     _ => "[]".to_string(),
                 }
             };
@@ -263,7 +263,7 @@ async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     ensure_synclog_table(db);
 
     let limit = up.getnumber as i32;
-    let rows = match db.query(
+    let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
         "SELECT * FROM synclog WHERE synced = 1 AND cid = ? AND worker != ? ORDER BY idpk ASC LIMIT ?",
         &[&expected_cid as &dyn rusqlite::ToSql, &expected_worker, &limit],
     ) {
@@ -287,7 +287,7 @@ async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
             params: {
                 match row.get("params") {
                     Some(Value::String(s)) => s.clone(),
-                    Some(v @ Value::Array(_)) | Some(v @ Value::Object(_)) => serde_json::to_string(v).unwrap_or_default(),
+                    Some(v @ Value::Array(_)) | Some(v @ Value::Object(_)) => serde_json::to_string(&v).unwrap_or_default(),
                     _ => String::new(),
                 }
             },

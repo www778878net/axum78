@@ -9,7 +9,7 @@
 use base::UpInfo;
 use base64::Engine;
 use database::datastate::TestTb;
-use database::{get_worker_id, next_id_string};
+use database::next_id_string;
 use prost::Message;
 
 #[derive(Clone, PartialEq, Message)]
@@ -26,6 +26,10 @@ pub struct testtbItem {
     pub item: String,
     #[prost(string, tag = "6")]
     pub data: String,
+    #[prost(string, tag = "7")]
+    pub upby: String,
+    #[prost(string, tag = "8")]
+    pub uptime: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -179,25 +183,17 @@ async fn test_all_plans() {
     // 远程数据库路径（服务器端）
     let remote_db_path = "c:\\7788\\rustdemo\\rustdemo\\crates\\axum78\\tmp\\data\\remote.db";
     
-    // 清空远程数据库（服务器端）
+    // 删除旧表并重新创建（远程数据库）
     let remote_testtb = TestTb::with_db_path(remote_db_path);
-    let rows = remote_testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
-    for row in &rows {
-        let _ = remote_testtb.m_del(&row.id, "testtb", "清空远程测试表");
-    }
-    println!("清空远程数据库: {} 条记录", rows.len());
+    let _ = remote_testtb.db.execute("DROP TABLE IF EXISTS testtb");
+    let _ = remote_testtb.db.execute(database::datastate::TESTTB_CREATE_SQL);
+    println!("远程数据库: 已重建testtb表");
     
-    // 清空本地数据库（客户端端）
+    // 删除旧表并重新创建（本地数据库）
     let local_testtb = TestTb::new();
-    let rows = local_testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
-    for row in &rows {
-        let _ = local_testtb.m_del(&row.id, "testtb", "清空本地测试表");
-    }
-    println!("清空本地数据库: {} 条记录", rows.len());
-    
-    // 再次检查本地数据库是否清空
-    let rows = local_testtb.mlist("testtb", 1000, "再次检查").unwrap_or_default();
-    println!("清空后本地数据库记录数: {}", rows.len());
+    let _ = local_testtb.db.execute("DROP TABLE IF EXISTS testtb");
+    let _ = local_testtb.db.execute(database::datastate::TESTTB_CREATE_SQL);
+    println!("本地数据库: 已重建testtb表");
     
     // 启动服务器（服务器端使用远程数据库路径）
     let app = axum78::create_router();
@@ -208,6 +204,22 @@ async fn test_all_plans() {
     
     // 等待服务器启动
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    
+    // ===== 方案0: SID验证测试 =====
+    println!("\n========== 方案0: SID验证测试 ==========");
+    
+    // 测试空SID
+    let empty_sid_result = download_from_server("").await;
+    println!("空SID测试: {:?}", empty_sid_result);
+    assert!(empty_sid_result.is_err(), "空SID应该被拒绝");
+    
+    // 测试无效SID格式（有效格式但CID不存在）
+    let invalid_sid_result = download_from_server("invalid-cid-xyz").await;
+    println!("无效SID测试: {:?}", invalid_sid_result);
+    // 注意：简单验证只检查格式，不检查CID是否存在于数据库
+    // 如果需要严格验证，需要启用数据库验证
+    
+    println!("✅ 方案0通过 - SID验证测试");
     
     // ===== 方案1: 单向下载测试 =====
     println!("\n========== 方案1: 单向下载测试 ==========");
@@ -234,6 +246,7 @@ async fn test_all_plans() {
     println!("下载到 {} 条记录", items.len());
     
     // 客户端保存下载的数据（使用本地数据库）
+    // 使用 m_sync_save 方法，因为这是同步数据，不应该自动填充 CID、upby、uptime
     for item in &items {
         println!("准备保存: id={}, kind={}", item.id, item.kind);
         let mut record = std::collections::HashMap::new();
@@ -242,8 +255,10 @@ async fn test_all_plans() {
         record.insert("kind".to_string(), serde_json::json!(item.kind));
         record.insert("item".to_string(), serde_json::json!(item.item));
         record.insert("data".to_string(), serde_json::json!(item.data));
+        record.insert("upby".to_string(), serde_json::json!(item.upby));
+        record.insert("uptime".to_string(), serde_json::json!(item.uptime));
         
-        let result = local_testtb.m_save(&record, "testtb", "方案1-客户端下载");
+        let result = local_testtb.m_sync_save(&record);
         println!("保存结果: {:?}", result);
     }
     
@@ -468,5 +483,4 @@ async fn test_all_plans() {
     }
     
     println!("\n========== 所有测试通过 ==========");
-    println!("worker_id: {}", get_worker_id());
 }
