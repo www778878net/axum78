@@ -59,7 +59,9 @@ pub struct SynclogBatch {
 }
 
 pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
-    let db = match LocalDB::default_instance() {
+    // 服务器端使用远程数据库路径
+    let remote_db_path = "c:\\7788\\rustdemo\\rustdemo\\crates\\axum78\\tmp\\data\\remote.db";
+    let db = match LocalDB::new(Some(remote_db_path), None) {
         Ok(d) => d,
         Err(e) => {
             let resp = Response::fail(&format!("数据库初始化失败: {}", e), -1);
@@ -153,6 +155,28 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
     ensure_synclog_table(db);
     ensure_testtb_table(db);
 
+    // 先检查synclog表中有多少条记录
+    let count_rows = match db.query("SELECT COUNT(*) as cnt FROM synclog", &[]) {
+        Ok(r) => r,
+        Err(e) => {
+            let resp = Response::fail(&format!("查询synclog表失败: {}", e), -1);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+        }
+    };
+    let total_count = count_rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()).unwrap_or(0);
+    
+    // 检查synced=0的记录数
+    let pending_rows = match db.query("SELECT COUNT(*) as cnt FROM synclog WHERE synced = 0", &[]) {
+        Ok(r) => r,
+        Err(e) => {
+            let resp = Response::fail(&format!("查询pending记录失败: {}", e), -1);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+        }
+    };
+    let pending_count = pending_rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()).unwrap_or(0);
+    
+    println!("[doWork] synclog表总记录: {}, 待处理: {}", total_count, pending_count);
+
     let limit = 100;
     let max_batches = 10;
     let mut total_processed = 0i32;
@@ -164,14 +188,21 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
             &[&limit as &dyn rusqlite::ToSql],
         ) {
             Ok(r) => r,
-            Err(_) => break,
+            Err(e) => {
+                eprintln!("[doWork] 查询失败: {}", e);
+                break;
+            }
         };
 
+        println!("[doWork] 查询返回 {} 条记录", rows.len());
+
         if rows.is_empty() {
+            println!("[doWork] 没有待处理记录");
             break;
         }
 
         batch_count += 1;
+        println!("[doWork] 批次 {} 处理 {} 条记录", batch_count, rows.len());
 
         for row in &rows {
             let idpk = row.get("idpk").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -271,7 +302,11 @@ async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
 
     let batch = SynclogBatch { items };
     let bytedata = batch.encode_to_vec();
-    let resp = Response::success_bytes(bytedata);
+    use base64::{Engine as _, engine::general_purpose};
+    let bytedata_base64 = general_purpose::STANDARD.encode(&bytedata);
+    let resp = Response::success_json(&serde_json::json!({
+        "bytedata": bytedata_base64
+    }));
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 

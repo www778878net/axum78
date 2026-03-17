@@ -77,11 +77,6 @@ const CID: &str = "test-cid-789";
 const WORKER_A: &str = "worker-A";
 const WORKER_B: &str = "worker-B";
 
-fn count_testtb() -> i32 {
-    let testtb = TestTb::new();
-    testtb.mlist("testtb", 1000, "计数").map(|r| r.len() as i32).unwrap_or(0)
-}
-
 async fn download_from_server(sid: &str) -> Result<Vec<testtbItem>, String> {
     let client = reqwest::Client::new();
     let body = serde_json::json!({"sid": sid, "getnumber": 100}).to_string();
@@ -100,9 +95,19 @@ async fn download_from_server(sid: &str) -> Result<Vec<testtbItem>, String> {
         return Err(json.get("errmsg").and_then(|v| v.as_str()).unwrap_or("未知错误").to_string());
     }
     
+    // 打印服务器返回的原始数据
+    println!("服务器返回的JSON: {:?}", json);
+    
     let bytedata = json.get("bytedata").and_then(|v| v.as_array()).ok_or("无bytedata")?;
     let bytes: Vec<u8> = bytedata.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect();
+    println!("bytedata长度: {} bytes", bytes.len());
+    
     let result = testtb::decode(&*bytes).map_err(|e| e.to_string())?;
+    println!("解码后的items数量: {}", result.items.len());
+    for item in &result.items {
+        println!("解码后: id={}, kind={}", item.id, item.kind);
+    }
+    
     Ok(result.items)
 }
 
@@ -169,16 +174,32 @@ async fn test_all_plans() {
     println!("\n========== 多端同步测试 ==========");
     
     let sid = format!("{}|{}", CID, WORKER_A);
-    let up = UpInfo::new();
+    let _up = UpInfo::new();
     
-    // 清空表
-    let testtb = TestTb::new();
-    let rows = testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
+    // 远程数据库路径（服务器端）
+    let remote_db_path = "c:\\7788\\rustdemo\\rustdemo\\crates\\axum78\\tmp\\data\\remote.db";
+    
+    // 清空远程数据库（服务器端）
+    let remote_testtb = TestTb::with_db_path(remote_db_path);
+    let rows = remote_testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
     for row in &rows {
-        let _ = testtb.m_del(&row.id, "testtb", "清空测试表");
+        let _ = remote_testtb.m_del(&row.id, "testtb", "清空远程测试表");
     }
+    println!("清空远程数据库: {} 条记录", rows.len());
     
-    // 启动服务器（使用默认数据库路径）
+    // 清空本地数据库（客户端端）
+    let local_testtb = TestTb::new();
+    let rows = local_testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
+    for row in &rows {
+        let _ = local_testtb.m_del(&row.id, "testtb", "清空本地测试表");
+    }
+    println!("清空本地数据库: {} 条记录", rows.len());
+    
+    // 再次检查本地数据库是否清空
+    let rows = local_testtb.mlist("testtb", 1000, "再次检查").unwrap_or_default();
+    println!("清空后本地数据库记录数: {}", rows.len());
+    
+    // 启动服务器（服务器端使用远程数据库路径）
     let app = axum78::create_router();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3780").await.expect("绑定端口失败");
     let _server_handle = tokio::spawn(async move {
@@ -191,8 +212,7 @@ async fn test_all_plans() {
     // ===== 方案1: 单向下载测试 =====
     println!("\n========== 方案1: 单向下载测试 ==========");
     
-    // 服务器插入5条数据（使用DataState基类）
-    let testtb_state = TestTb::new();
+    // 服务器插入5条数据（使用远程数据库）
     for i in 0..5 {
         let mut record = std::collections::HashMap::new();
         record.insert("cid".to_string(), serde_json::json!(CID));
@@ -200,41 +220,44 @@ async fn test_all_plans() {
         record.insert("item".to_string(), serde_json::json!(format!("server_item_{}", i)));
         record.insert("data".to_string(), serde_json::json!(format!("server_data_{}", i)));
         
-        let id = testtb_state.m_save(&record, "testtb", &format!("方案1-服务器插入{}", i)).expect("保存失败");
+        let id = remote_testtb.m_save(&record, "testtb", &format!("方案1-服务器插入{}", i)).expect("保存失败");
         println!("服务器插入: {} -> id={}", i, &id);
     }
     
-    let server_count = count_testtb();
-    println!("服务器记录数: {}", server_count);
-    assert_eq!(server_count, 5);
+    // 检查服务器记录数（远程数据库）
+    let server_rows = remote_testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
+    println!("服务器记录数: {}", server_rows.len());
+    assert_eq!(server_rows.len(), 5);
     
     // 客户端下载
     let items = download_from_server(&sid).await.expect("下载失败");
     println!("下载到 {} 条记录", items.len());
     
-    // 客户端保存下载的数据
-    let client_state = TestTb::new();
+    // 客户端保存下载的数据（使用本地数据库）
     for item in &items {
+        println!("准备保存: id={}, kind={}", item.id, item.kind);
         let mut record = std::collections::HashMap::new();
-        record.insert("id".to_string(), serde_json::json!(&item.id));
-        record.insert("cid".to_string(), serde_json::json!(&item.cid));
-        record.insert("kind".to_string(), serde_json::json!(&item.kind));
-        record.insert("item".to_string(), serde_json::json!(&item.item));
-        record.insert("data".to_string(), serde_json::json!(&item.data));
+        record.insert("id".to_string(), serde_json::json!(item.id));
+        record.insert("cid".to_string(), serde_json::json!(item.cid));
+        record.insert("kind".to_string(), serde_json::json!(item.kind));
+        record.insert("item".to_string(), serde_json::json!(item.item));
+        record.insert("data".to_string(), serde_json::json!(item.data));
         
-        let _ = client_state.m_save(&record, "testtb", "方案1-客户端下载");
+        let result = local_testtb.m_save(&record, "testtb", "方案1-客户端下载");
+        println!("保存结果: {:?}", result);
     }
     
-    let client_count = count_testtb();
-    println!("客户端记录数: {}", client_count);
-    assert_eq!(client_count, 5);
+    // 检查客户端记录数（本地数据库）
+    let client_rows = local_testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
+    println!("客户端记录数: {}", client_rows.len());
+    assert_eq!(client_rows.len(), 5);
     println!("✅ 方案1通过");
     
     // ===== 方案2: 客户端变更同步 =====
     println!("\n========== 方案2: 客户端变更同步 ==========");
     
     // 获取现有数据用于修改/删除
-    let existing = client_state.mlist("testtb", 2, "获取修改删除目标").expect("查询失败");
+    let existing = local_testtb.mlist("testtb", 2, "获取修改删除目标").expect("查询失败");
     let id_for_update = existing.get(0).map(|r| r.id.clone()).unwrap_or_default();
     let id_for_delete = existing.get(1).map(|r| r.id.clone()).unwrap_or_default();
     
@@ -248,7 +271,7 @@ async fn test_all_plans() {
         record.insert("item".to_string(), serde_json::json!(format!("add_item_{}", i)));
         record.insert("data".to_string(), serde_json::json!(format!("add_data_{}", i)));
         
-        let id = client_state.m_save(&record, "testtb", &format!("方案2-客户端添加{}", i)).expect("保存失败");
+        let id = local_testtb.m_save(&record, "testtb", &format!("方案2-客户端添加{}", i)).expect("保存失败");
         
         synclog_items.push(SynclogItem {
             id: next_id_string(),
@@ -274,7 +297,7 @@ async fn test_all_plans() {
     update_record.insert("kind".to_string(), serde_json::json!("updated_kind"));
     update_record.insert("item".to_string(), serde_json::json!("updated_item"));
     update_record.insert("data".to_string(), serde_json::json!("updated_data"));
-    client_state.m_update(&id_for_update, &update_record, "testtb", "方案2-客户端修改").expect("修改失败");
+    local_testtb.m_update(&id_for_update, &update_record, "testtb", "方案2-客户端修改").expect("修改失败");
     
     synclog_items.push(SynclogItem {
         id: next_id_string(),
@@ -295,7 +318,7 @@ async fn test_all_plans() {
     println!("客户端修改1条");
     
     // 删除1条
-    client_state.m_del(&id_for_delete, "testtb", "方案2-客户端删除").expect("删除失败");
+    local_testtb.m_del(&id_for_delete, "testtb", "方案2-客户端删除").expect("删除失败");
     
     synclog_items.push(SynclogItem {
         id: next_id_string(),
@@ -323,12 +346,12 @@ async fn test_all_plans() {
     let (processed, _) = do_work().await.expect("doWork失败");
     println!("doWork处理 {} 条", processed);
     
-    // 验证服务器数据
-    let server_count = count_testtb();
-    let client_count = count_testtb();
-    println!("客户端记录数: {}", client_count);
-    println!("服务器记录数: {}", server_count);
-    assert_eq!(client_count, server_count);
+    // 验证服务器数据（远程数据库）
+    let server_rows = remote_testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
+    let client_rows = local_testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
+    println!("客户端记录数: {}", client_rows.len());
+    println!("服务器记录数: {}", server_rows.len());
+    assert_eq!(client_rows.len(), server_rows.len());
     println!("✅ 方案2通过");
     
     // ===== 方案3: 服务器变更同步 =====
@@ -386,7 +409,7 @@ async fn test_all_plans() {
         panic!("下载synclog失败: {:?}", json.get("errmsg"));
     }
     
-    // jsdata是JSON字符串，里面包含bytedata(base64编码)
+    // jsdata字段是JSON字符串
     let jsdata_str = json.get("jsdata").and_then(|v| v.as_str()).expect("无jsdata");
     let jsdata: serde_json::Value = serde_json::from_str(jsdata_str).expect("解析jsdata失败");
     let bytedata_base64 = jsdata.get("bytedata").and_then(|v| v.as_str()).expect("无bytedata");
@@ -408,7 +431,7 @@ async fn test_all_plans() {
                 record.insert("item".to_string(), serde_json::Value::String(params.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string()));
                 record.insert("data".to_string(), serde_json::Value::String(params.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string()));
                 
-                let result = client_state.m_save(&record, "testtb", "方案3-客户端同步插入");
+                let result = local_testtb.m_save(&record, "testtb", "方案3-客户端同步插入");
                 let id_str = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
                 println!("INSERT结果: {:?}, id={}", result, id_str);
             }
@@ -419,26 +442,27 @@ async fn test_all_plans() {
                 record.insert("item".to_string(), serde_json::Value::String(params.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string()));
                 record.insert("data".to_string(), serde_json::Value::String(params.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string()));
                 
-                let _ = client_state.m_update(&id, &record, "testtb", "方案3-客户端同步修改");
+                let _ = local_testtb.m_update(&id, &record, "testtb", "方案3-客户端同步修改");
             }
             "delete" => {
                 let id = params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let _ = client_state.m_del(&id, "testtb", "方案3-客户端同步删除");
+                let _ = local_testtb.m_del(&id, "testtb", "方案3-客户端同步删除");
             }
             _ => {}
         }
     }
     
-    let server_count = count_testtb();
-    let client_count = count_testtb();
-    println!("客户端记录数: {}", client_count);
-    println!("服务器记录数: {}", server_count);
-    assert_eq!(client_count, server_count);
+    // 验证最终数据一致性
+    let server_rows = remote_testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
+    let client_rows = local_testtb.mlist("testtb", 1000, "获取所有记录").unwrap_or_default();
+    println!("客户端记录数: {}", client_rows.len());
+    println!("服务器记录数: {}", server_rows.len());
+    assert_eq!(client_rows.len(), server_rows.len());
     println!("✅ 方案3通过");
     
     // 验证upby/uptime字段
     println!("\n========== 验证upby/uptime字段 ==========");
-    let rows = client_state.mlist("testtb", 3, "验证字段").unwrap_or_default();
+    let rows = local_testtb.mlist("testtb", 3, "验证字段").unwrap_or_default();
     for row in &rows {
         println!("客户端: id={}, kind={}, upby={}, uptime={}", &row.id[..8.min(row.id.len())], row.kind, row.upby, row.uptime);
     }
