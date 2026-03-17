@@ -15,7 +15,7 @@ pub mod apitest;
 pub mod apisvc;
 pub mod apigame;
 
-pub use context::{UpInfo, RequestBody, Context, VerifyResult, verify_sid_simple, verify_sid_db, verify_sid_web_db, get_lovers_state, LoversDataState, AuthConfig, get_auth_config, sid_auth_middleware};
+pub use context::{UpInfo, RequestBody, Context, VerifyResult, verify_sid, verify_sid_web, get_lovers_state, LoversDataState, AuthConfig, get_auth_config, sid_auth_middleware};
 pub use response::{ApiResponse, ApiError};
 pub use base_api::{BaseApi, TableConfig};
 pub use router::{ApiRouter, ApiRouter78, Controller78};
@@ -37,11 +37,13 @@ use axum::{
     response::IntoResponse,
     routing::any,
     Router as AxumRouter,
+    middleware,
 };
 use std::sync::Arc;
 use base::Response;
 use tower_http::cors::{CorsLayer, Any};
 
+#[derive(Clone)]
 pub struct AppState;
 
 impl AppState {
@@ -50,7 +52,7 @@ impl AppState {
     }
 }
 
-pub fn create_router() -> AxumRouter {
+pub fn create_router() -> AxumRouter<AppState> {
     let state = Arc::new(AppState::new());
     
     let cors = CorsLayer::new()
@@ -60,6 +62,7 @@ pub fn create_router() -> AxumRouter {
     
     AxumRouter::new()
         .route("/:apisys/:apimicro/:apiobj/:apifun", any(api_handler))
+        .layer(middleware::from_fn(sid_auth_middleware))
         .route("/health", axum::routing::get(health_handler))
         .with_state(state)
         .layer(cors)
@@ -71,29 +74,16 @@ async fn health_handler() -> impl IntoResponse {
 
 async fn api_handler(
     AxumPath((apisys, apimicro, apiobj, apifun)): AxumPath<(String, String, String, String)>,
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-    body: Bytes,
+    axum::extract::Extension(verify_result): axum::extract::Extension<VerifyResult>,
+    axum::extract::Extension(up): axum::extract::Extension<UpInfo>,
 ) -> impl IntoResponse {
     let apisys_lower = apisys.to_lowercase();
     let apimicro_lower = apimicro.to_lowercase();
     let apifun_lower = apifun.to_lowercase();
 
-    if apifun.starts_with('_') || !apisys_lower.starts_with("api") || apimicro_lower.starts_with("dll") {
-        let resp = Response::fail("Access denied", 403);
-        return (AxumStatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-    }
-
-    let up: base::UpInfo = match serde_json::from_slice(&body) {
-        Ok(u) => u,
-        Err(e) => {
-            let resp = Response::fail(&format!("解析请求失败: {}", e), -1);
-            return (AxumStatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-        }
-    };
-
     let (status, resp_bytes) = match (apisys_lower.as_str(), apimicro_lower.as_str(), apiobj.as_str()) {
         ("apitest", "testmenu", "testtb") => {
-            apitest::testmenu::testtb::handle(&apifun_lower, up).await
+            apitest::testmenu::testtb::handle(&apifun_lower, up, &verify_result).await
         }
         ("apisvc", "backsvc", "synclog") => {
             apisvc::backsvc::synclog::handle(&apifun_lower, up).await

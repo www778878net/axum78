@@ -139,6 +139,30 @@ fn read_local_synclog(testtb: &TestTb) -> Vec<SynclogItem> {
     }).collect()
 }
 
+fn read_remote_synclog(testtb: &TestTb) -> Vec<SynclogItem> {
+    let sql = "SELECT id, tbname, action, params, idrow, worker, cid, upby FROM synclog WHERE tbname = 'testtb' AND synced = 0 ORDER BY id";
+    let rows = testtb.db.query(sql, &[]).unwrap_or_default();
+    
+    rows.iter().map(|row| {
+        SynclogItem {
+            id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            apisys: "v1".to_string(),
+            apimicro: "iflow".to_string(),
+            apiobj: "synclog".to_string(),
+            tbname: row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            action: row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            cmdtext: String::new(),
+            params: row.get("params").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            idrow: row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            worker: row.get("worker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            synced: 0,
+            cmdtextmd5: String::new(),
+            cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            upby: row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        }
+    }).collect()
+}
+
 async fn upload_synclog(sid: &str, items: Vec<SynclogItem>) -> Result<i32, String> {
     use base64::{Engine as _, engine::general_purpose};
     
@@ -351,36 +375,27 @@ async fn test_all_plans() {
     // ===== 方案3: 服务器变更同步 =====
     println!("\n========== 方案3: 服务器变更同步 ==========");
     
-    // 模拟另一个客户端(worker-B)上传变更
-    let worker_b_sid = format!("{}|{}", CID, WORKER_B);
+    // 服务器端直接操作数据库（使用 DataState 基类）
+    // 这些操作会产生 synclog，客户端可以下载并执行
     
-    // 服务器添加2条 (通过worker-B上传synclog，然后doWork执行)
-    let mut synclog_items_b: Vec<SynclogItem> = Vec::new();
+    // 服务器添加2条（使用 m_save 自动填充 upby、uptime，自动写 synclog）
     for i in 0..2 {
-        let id = next_id_string();
+        let mut record = std::collections::HashMap::new();
+        record.insert("cid".to_string(), serde_json::json!(CID));
+        record.insert("kind".to_string(), serde_json::json!(format!("server_add_kind_{}", i)));
+        record.insert("item".to_string(), serde_json::json!(format!("server_add_item_{}", i)));
+        record.insert("data".to_string(), serde_json::json!(format!("server_add_data_{}", i)));
         
-        // params 顺序按字母顺序：cid, data, id, item, kind
-        synclog_items_b.push(SynclogItem {
-            id: next_id_string(),
-            apisys: "v1".to_string(),
-            apimicro: "iflow".to_string(),
-            apiobj: "synclog".to_string(),
-            tbname: "testtb".to_string(),
-            action: "insert".to_string(),
-            cmdtext: String::new(),
-            params: serde_json::to_string(&[CID, &format!("server_add_data_{}", i), &id, &format!("server_add_item_{}", i), &format!("server_add_kind_{}", i)]).unwrap_or_default(),
-            idrow: id.clone(),
-            worker: WORKER_B.to_string(),
-            synced: 0,
-            cmdtextmd5: String::new(),
-            cid: CID.to_string(),
-            upby: WORKER_B.to_string(),
-        });
+        let _ = remote_testtb.m_save(&record, "testtb", &format!("方案3-服务器添加{}", i)).expect("保存失败");
     }
     println!("服务器添加2条");
     
-    // 上传synclog (通过worker-B)
-    let batches = upload_synclog(&worker_b_sid, synclog_items_b).await.expect("上传失败");
+    // 读取服务器端产生的 synclog
+    let server_synclog = read_remote_synclog(&remote_testtb);
+    println!("服务器产生 {} 条synclog", server_synclog.len());
+    
+    // 上传synclog到服务器（模拟另一个客户端上传）
+    let batches = upload_synclog(&format!("{}|{}", CID, WORKER_B), server_synclog).await.expect("上传失败");
     println!("上传 {} 条synclog", batches);
     
     // 执行doWork (这会在服务器端执行INSERT)

@@ -10,7 +10,7 @@ use axum::{
     middleware::Next,
 };
 use base::{UpInfo, Response as BaseResponse, ProjectPath};
-use crate::verify_sid_simple;
+use crate::{verify_sid, get_lovers_state};
 use std::collections::HashSet;
 
 /// 认证配置
@@ -137,7 +137,8 @@ pub async fn sid_auth_middleware(
     }
 
     // SID 验证
-    let verify_result = match verify_sid_simple(&up.sid) {
+    let lovers_state = get_lovers_state();
+    let verify_result = match verify_sid(&up.sid, &lovers_state) {
         Ok(v) => v,
         Err(resp) => {
             return (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default())).into_response();

@@ -11,6 +11,7 @@ use axum::{
 };
 use base::{UpInfo, Response};
 use database::datastate::TestTb;
+use crate::VerifyResult;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +32,10 @@ pub struct testtbItem {
     pub item: String,
     #[prost(string, tag = "6")]
     pub data: String,
+    #[prost(string, tag = "7")]
+    pub upby: String,
+    #[prost(string, tag = "8")]
+    pub uptime: String,
 }
 
 /// testtb 包含多项的数据结构
@@ -43,9 +48,11 @@ pub struct testtb {
 // ============ API实现 ============
 
 /// 处理testtb API请求
-pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
+/// 
+/// verify_result: 中间件已经验证过的结果，包含 cid、uid、uname
+pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (StatusCode, Bytes) {
     match apifun.to_lowercase().as_str() {
-        "get" => get(&up).await,
+        "get" => get(&up, verify_result).await,
         "test" => test(&up).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
@@ -64,23 +71,10 @@ async fn test(up: &UpInfo) -> (StatusCode, Bytes) {
 }
 
 /// GET - 获取数据
-async fn get(up: &UpInfo) -> (StatusCode, Bytes) {
-    // 第一层验证：简单格式验证（从 SID 提取 CID）
-    let verify_result = match crate::context::verify_sid_simple(&up.sid) {
-        Ok(r) => r,
-        Err(e) => {
-            return (StatusCode::UNAUTHORIZED, Bytes::from(serde_json::to_string(&e).unwrap_or_default()));
-        }
-    };
-    let expected_cid = verify_result.cid;
+async fn get(up: &UpInfo, verify_result: &VerifyResult) -> (StatusCode, Bytes) {
+    // 中间件已经验证过 SID，verify_result 包含 cid、uid、uname
+    let expected_cid = &verify_result.cid;
     
-    // 第二层验证：数据库验证（可选，根据配置决定是否启用）
-    // 如果需要严格验证，取消下面的注释
-    // let lovers_state = crate::get_lovers_state();
-    // if let Err(e) = crate::verify_sid_db(&up.sid, &lovers_state) {
-    //     return (StatusCode::UNAUTHORIZED, Bytes::from(serde_json::to_string(&e).unwrap_or_default()));
-    // }
-
     // 服务器端使用远程数据库路径
     let remote_db_path = "c:\\7788\\rustdemo\\rustdemo\\crates\\axum78\\tmp\\data\\remote.db";
     let testtb_state = TestTb::with_db_path(remote_db_path);
@@ -94,7 +88,7 @@ async fn get(up: &UpInfo) -> (StatusCode, Bytes) {
     };
 
     let items: Vec<testtbItem> = rows.iter().filter_map(|row| {
-        if row.cid.is_empty() || row.cid == expected_cid {
+        if row.cid.is_empty() || row.cid == *expected_cid {
             Some(testtbItem {
                 id: row.id.clone(),
                 idpk: row.idpk as i32,
@@ -102,6 +96,8 @@ async fn get(up: &UpInfo) -> (StatusCode, Bytes) {
                 kind: row.kind.clone(),
                 item: row.item.clone(),
                 data: row.data.clone(),
+                upby: row.upby.clone(),
+                uptime: row.uptime.clone(),
             })
         } else {
             None

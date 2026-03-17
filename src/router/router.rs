@@ -122,9 +122,13 @@ async fn api_handler(
     };
 
     // ========== 构建 UpInfo ==========
-    let mut up = UpInfo::from_route(&apisys, &apimicro, &apiobj, &apifun);
-    up.fill_from_body(&body);
+    let mut up = UpInfo::new();
+    // 从 RequestBody 填充基本字段
+    up.sid = body.sid.clone();
+    up.getnumber = body.number.unwrap_or(0) as i32;
+    up.getstart = body.start.unwrap_or(0) as i32;
 
+    
     // ========== 调用方法 ==========
     let result = controller.call(&mut up, &apifun).await;
 
