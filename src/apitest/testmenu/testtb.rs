@@ -65,13 +65,21 @@ async fn test(up: &UpInfo) -> (StatusCode, Bytes) {
 
 /// GET - 获取数据
 async fn get(up: &UpInfo) -> (StatusCode, Bytes) {
-    let expected_cid = if up.sid.is_empty() {
-        String::new()
-    } else if up.sid.contains('|') {
-        up.sid.split('|').next().unwrap_or("").to_string()
-    } else {
-        up.sid.clone()
+    // 第一层验证：简单格式验证（从 SID 提取 CID）
+    let verify_result = match crate::context::verify_sid_simple(&up.sid) {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::UNAUTHORIZED, Bytes::from(serde_json::to_string(&e).unwrap_or_default()));
+        }
     };
+    let expected_cid = verify_result.cid;
+    
+    // 第二层验证：数据库验证（可选，根据配置决定是否启用）
+    // 如果需要严格验证，取消下面的注释
+    // let lovers_state = crate::get_lovers_state();
+    // if let Err(e) = crate::verify_sid_db(&up.sid, &lovers_state) {
+    //     return (StatusCode::UNAUTHORIZED, Bytes::from(serde_json::to_string(&e).unwrap_or_default()));
+    // }
 
     // 服务器端使用远程数据库路径
     let remote_db_path = "c:\\7788\\rustdemo\\rustdemo\\crates\\axum78\\tmp\\data\\remote.db";

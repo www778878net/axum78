@@ -115,6 +115,30 @@ async fn download_from_server(sid: &str) -> Result<Vec<testtbItem>, String> {
     Ok(result.items)
 }
 
+fn read_local_synclog(testtb: &TestTb) -> Vec<SynclogItem> {
+    let sql = "SELECT id, tbname, action, params, idrow, worker, cid, upby FROM synclog WHERE tbname = 'testtb' AND synced = 0 ORDER BY id";
+    let rows = testtb.db.query(sql, &[]).unwrap_or_default();
+    
+    rows.iter().map(|row| {
+        SynclogItem {
+            id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            apisys: "v1".to_string(),
+            apimicro: "iflow".to_string(),
+            apiobj: "synclog".to_string(),
+            tbname: row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            action: row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            cmdtext: String::new(),
+            params: row.get("params").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            idrow: row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            worker: row.get("worker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            synced: 0,
+            cmdtextmd5: String::new(),
+            cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            upby: row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        }
+    }).collect()
+}
+
 async fn upload_synclog(sid: &str, items: Vec<SynclogItem>) -> Result<i32, String> {
     use base64::{Engine as _, engine::general_purpose};
     
@@ -186,12 +210,16 @@ async fn test_all_plans() {
     // 删除旧表并重新创建（远程数据库）
     let remote_testtb = TestTb::with_db_path(remote_db_path);
     let _ = remote_testtb.db.execute("DROP TABLE IF EXISTS testtb");
+    let _ = remote_testtb.db.execute("DELETE FROM synclog WHERE tbname='testtb'");
     let _ = remote_testtb.db.execute(database::datastate::TESTTB_CREATE_SQL);
     println!("远程数据库: 已重建testtb表");
     
     // 删除旧表并重新创建（本地数据库）
-    let local_testtb = TestTb::new();
+    // 使用 with_db_path 方法，避免使用单例模式
+    let local_db_path = "c:\\7788\\rustdemo\\rustdemo\\docs\\config\\local.db";
+    let local_testtb = TestTb::with_db_path(local_db_path);
     let _ = local_testtb.db.execute("DROP TABLE IF EXISTS testtb");
+    let _ = local_testtb.db.execute("DELETE FROM synclog WHERE tbname='testtb'");
     let _ = local_testtb.db.execute(database::datastate::TESTTB_CREATE_SQL);
     println!("本地数据库: 已重建testtb表");
     
@@ -276,9 +304,7 @@ async fn test_all_plans() {
     let id_for_update = existing.get(0).map(|r| r.id.clone()).unwrap_or_default();
     let id_for_delete = existing.get(1).map(|r| r.id.clone()).unwrap_or_default();
     
-    let mut synclog_items: Vec<SynclogItem> = Vec::new();
-    
-    // 添加2条
+    // 添加2条（使用 m_save 自动写 sync_queue）
     for i in 0..2 {
         let mut record = std::collections::HashMap::new();
         record.insert("cid".to_string(), serde_json::json!(CID));
@@ -286,72 +312,25 @@ async fn test_all_plans() {
         record.insert("item".to_string(), serde_json::json!(format!("add_item_{}", i)));
         record.insert("data".to_string(), serde_json::json!(format!("add_data_{}", i)));
         
-        let id = local_testtb.m_save(&record, "testtb", &format!("方案2-客户端添加{}", i)).expect("保存失败");
-        
-        synclog_items.push(SynclogItem {
-            id: next_id_string(),
-            apisys: "v1".to_string(),
-            apimicro: "iflow".to_string(),
-            apiobj: "synclog".to_string(),
-            tbname: "testtb".to_string(),
-            action: "insert".to_string(),
-            cmdtext: String::new(),
-            params: serde_json::to_string(&[&id, CID, &format!("add_kind_{}", i), &format!("add_item_{}", i), &format!("add_data_{}", i)]).unwrap_or_default(),
-            idrow: id.clone(),
-            worker: WORKER_A.to_string(),
-            synced: 0,
-            cmdtextmd5: String::new(),
-            cid: CID.to_string(),
-            upby: WORKER_A.to_string(),
-        });
+        let _ = local_testtb.m_save(&record, "testtb", &format!("方案2-客户端添加{}", i)).expect("保存失败");
     }
     println!("客户端添加2条");
     
-    // 修改1条
+    // 修改1条（使用 m_update 自动写 sync_queue）
     let mut update_record = std::collections::HashMap::new();
     update_record.insert("kind".to_string(), serde_json::json!("updated_kind"));
     update_record.insert("item".to_string(), serde_json::json!("updated_item"));
     update_record.insert("data".to_string(), serde_json::json!("updated_data"));
     local_testtb.m_update(&id_for_update, &update_record, "testtb", "方案2-客户端修改").expect("修改失败");
-    
-    synclog_items.push(SynclogItem {
-        id: next_id_string(),
-        apisys: "v1".to_string(),
-        apimicro: "iflow".to_string(),
-        apiobj: "synclog".to_string(),
-        tbname: "testtb".to_string(),
-        action: "update".to_string(),
-        cmdtext: String::new(),
-        params: serde_json::to_string(&["updated_kind", "updated_item", "updated_data", &id_for_update]).unwrap_or_default(),
-        idrow: id_for_update.clone(),
-        worker: WORKER_A.to_string(),
-        synced: 0,
-        cmdtextmd5: String::new(),
-        cid: CID.to_string(),
-        upby: WORKER_A.to_string(),
-    });
     println!("客户端修改1条");
     
-    // 删除1条
+    // 删除1条（使用 m_del 自动写 sync_queue）
     local_testtb.m_del(&id_for_delete, "testtb", "方案2-客户端删除").expect("删除失败");
-    
-    synclog_items.push(SynclogItem {
-        id: next_id_string(),
-        apisys: "v1".to_string(),
-        apimicro: "iflow".to_string(),
-        apiobj: "synclog".to_string(),
-        tbname: "testtb".to_string(),
-        action: "delete".to_string(),
-        cmdtext: String::new(),
-        params: serde_json::to_string(&[&id_for_delete]).unwrap_or_default(),
-        idrow: id_for_delete.clone(),
-        worker: WORKER_A.to_string(),
-        synced: 0,
-        cmdtextmd5: String::new(),
-        cid: CID.to_string(),
-        upby: WORKER_A.to_string(),
-    });
     println!("客户端删除1条");
+    
+    // 从本地 sync_queue 读取记录并上传到服务器
+    let synclog_items = read_local_synclog(&local_testtb);
+    println!("读取本地 sync_queue: {} 条", synclog_items.len());
     
     // 上传synclog
     let batches = upload_synclog(&sid, synclog_items).await.expect("上传失败");
@@ -380,6 +359,7 @@ async fn test_all_plans() {
     for i in 0..2 {
         let id = next_id_string();
         
+        // params 顺序按字母顺序：cid, data, id, item, kind
         synclog_items_b.push(SynclogItem {
             id: next_id_string(),
             apisys: "v1".to_string(),
@@ -388,7 +368,7 @@ async fn test_all_plans() {
             tbname: "testtb".to_string(),
             action: "insert".to_string(),
             cmdtext: String::new(),
-            params: serde_json::to_string(&[&id, CID, &format!("server_add_kind_{}", i), &format!("server_add_item_{}", i), &format!("server_add_data_{}", i)]).unwrap_or_default(),
+            params: serde_json::to_string(&[CID, &format!("server_add_data_{}", i), &id, &format!("server_add_item_{}", i), &format!("server_add_kind_{}", i)]).unwrap_or_default(),
             idrow: id.clone(),
             worker: WORKER_B.to_string(),
             synced: 0,
@@ -433,35 +413,50 @@ async fn test_all_plans() {
     
     println!("下载到 {} 条synclog", synclog_batch.items.len());
     
-    // 执行synclog中的SQL（使用DataState基类）
+    // 执行synclog中的SQL（使用 m_sync_save 方法，不自动填充字段）
     for item in &synclog_batch.items {
         let params: Vec<serde_json::Value> = serde_json::from_str(&item.params).unwrap_or_default();
         println!("执行: action={}, params={:?}", item.action, params);
         match item.action.as_str() {
             "insert" => {
+                // params 顺序是按字母顺序排列的：cid, data, id, item, kind, upby, uptime
                 let mut record = std::collections::HashMap::new();
-                record.insert("id".to_string(), serde_json::Value::String(params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string()));
-                record.insert("cid".to_string(), serde_json::Value::String(params.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string()));
-                record.insert("kind".to_string(), serde_json::Value::String(params.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string()));
-                record.insert("item".to_string(), serde_json::Value::String(params.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string()));
-                record.insert("data".to_string(), serde_json::Value::String(params.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string()));
+                record.insert("cid".to_string(), params.get(0).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("data".to_string(), params.get(1).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("id".to_string(), params.get(2).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("item".to_string(), params.get(3).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("kind".to_string(), params.get(4).cloned().unwrap_or(serde_json::Value::Null));
+                if params.len() > 5 {
+                    record.insert("upby".to_string(), params.get(5).cloned().unwrap_or(serde_json::Value::Null));
+                }
+                if params.len() > 6 {
+                    record.insert("uptime".to_string(), params.get(6).cloned().unwrap_or(serde_json::Value::Null));
+                }
                 
-                let result = local_testtb.m_save(&record, "testtb", "方案3-客户端同步插入");
-                let id_str = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
+                let result = local_testtb.m_sync_save(&record);
+                let id_str = params.get(2).and_then(|v| v.as_str()).unwrap_or("");
                 println!("INSERT结果: {:?}, id={}", result, id_str);
             }
             "update" => {
-                let id = params.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                // update params 顺序：cid, data, item, kind, upby, uptime, id（id 在最后）
+                let id = params.last().and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let mut record = std::collections::HashMap::new();
-                record.insert("kind".to_string(), serde_json::Value::String(params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string()));
-                record.insert("item".to_string(), serde_json::Value::String(params.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string()));
-                record.insert("data".to_string(), serde_json::Value::String(params.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string()));
+                record.insert("cid".to_string(), params.get(0).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("data".to_string(), params.get(1).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("item".to_string(), params.get(2).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("kind".to_string(), params.get(3).cloned().unwrap_or(serde_json::Value::Null));
+                if params.len() > 5 {
+                    record.insert("upby".to_string(), params.get(4).cloned().unwrap_or(serde_json::Value::Null));
+                }
+                if params.len() > 6 {
+                    record.insert("uptime".to_string(), params.get(5).cloned().unwrap_or(serde_json::Value::Null));
+                }
                 
-                let _ = local_testtb.m_update(&id, &record, "testtb", "方案3-客户端同步修改");
+                let _ = local_testtb.m_sync_update(&id, &record);
             }
             "delete" => {
                 let id = params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let _ = local_testtb.m_del(&id, "testtb", "方案3-客户端同步删除");
+                let _ = local_testtb.m_sync_del(&id);
             }
             _ => {}
         }

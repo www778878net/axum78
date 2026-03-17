@@ -61,7 +61,7 @@ pub struct SynclogBatch {
 pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
     // 服务器端使用远程数据库路径
     let remote_db_path = "c:\\7788\\rustdemo\\rustdemo\\crates\\axum78\\tmp\\data\\remote.db";
-    let db = match LocalDB::new(Some(remote_db_path), None) {
+    let db = match LocalDB::with_path(remote_db_path) {
         Ok(d) => d,
         Err(e) => {
             let resp = Response::fail(&format!("数据库初始化失败: {}", e), -1);
@@ -218,11 +218,14 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
             let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let upby = row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string();
             
+            println!("[doWork] 处理记录: idpk={}, tbname={}, action={}, idrow={}", idpk, tbname, action, idrow);
+            
             let result = process_synclog_item(db, &upby, &tbname, &action, &params_str, &idrow);
 
             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
             match result {
                 Ok(_) => {
+                    println!("[doWork] 处理成功: idpk={}", idpk);
                     let _ = db.execute_with_params(
                         "UPDATE synclog SET synced = 1, lasterrinfo = '', uptime = ? WHERE idpk = ?",
                         &[&now as &dyn rusqlite::ToSql, &idpk],
@@ -230,6 +233,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
                     total_processed += 1;
                 }
                 Err(e) => {
+                    println!("[doWork] 处理失败: idpk={}, error={}", idpk, e);
                     let _ = db.execute_with_params(
                         "UPDATE synclog SET synced = 2, lasterrinfo = ?, uptime = ? WHERE idpk = ?",
                         &[&e as &dyn rusqlite::ToSql, &now, &idpk],
@@ -362,11 +366,36 @@ fn process_synclog_item(
             if tbname != "testtb" {
                 return Err(format!("不支持的表: {}", tbname));
             }
-            let id = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
-            let cid = params.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            let kind = params.get(2).and_then(|v| v.as_str()).unwrap_or("");
-            let item = params.get(3).and_then(|v| v.as_str()).unwrap_or("");
-            let data = params.get(4).and_then(|v| v.as_str()).unwrap_or("");
+            
+            // params格式可能是：
+            // 1. [id, cid, kind, item, data] - 测试代码格式
+            // 2. [cid, data, id, item, kind, upby, uptime] - DataSync格式（按字段名字母顺序）
+            
+            // 尝试检测格式：如果第一个元素是雪花ID（纯数字），则是测试代码格式
+            let first_param = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
+            let is_test_format = first_param.chars().all(|c| c.is_ascii_digit());
+            
+            let (id, cid, kind, item, data) = if is_test_format && params.len() >= 5 {
+                // 测试代码格式: [id, cid, kind, item, data]
+                (
+                    params.get(0).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(1).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(2).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(3).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(4).and_then(|v| v.as_str()).unwrap_or(""),
+                )
+            } else if params.len() >= 5 {
+                // DataSync格式: [cid, data, id, item, kind, upby?, uptime?]
+                (
+                    params.get(2).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(0).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(4).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(3).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(1).and_then(|v| v.as_str()).unwrap_or(""),
+                )
+            } else {
+                return Err(format!("params格式错误: {}", params_str));
+            };
 
             let new_id = if id.is_empty() { database::next_id_string() } else { id.to_string() };
             
@@ -381,10 +410,33 @@ fn process_synclog_item(
             if tbname != "testtb" {
                 return Err(format!("不支持的表: {}", tbname));
             }
-            let kind = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
-            let item = params.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            let data = params.get(2).and_then(|v| v.as_str()).unwrap_or("");
-            let id = params.get(3).and_then(|v| v.as_str()).unwrap_or(idrow);
+            
+            // params格式可能是：
+            // 1. [kind, item, data, id] - 测试代码格式
+            // 2. [cid, data, id, item, kind, upby, uptime] - DataSync格式（按字段名字母顺序）
+            
+            let last_param = params.last().and_then(|v| v.as_str()).unwrap_or("");
+            let is_test_format = last_param.chars().all(|c| c.is_ascii_digit());
+            
+            let (id, kind, item, data) = if is_test_format && params.len() >= 4 {
+                // 测试代码格式: [kind, item, data, id]
+                (
+                    params.get(3).and_then(|v| v.as_str()).unwrap_or(idrow),
+                    params.get(0).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(1).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(2).and_then(|v| v.as_str()).unwrap_or(""),
+                )
+            } else if params.len() >= 5 {
+                // DataSync格式: [cid, data, id, item, kind, upby?, uptime?]
+                (
+                    params.get(2).and_then(|v| v.as_str()).unwrap_or(idrow),
+                    params.get(4).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(3).and_then(|v| v.as_str()).unwrap_or(""),
+                    params.get(1).and_then(|v| v.as_str()).unwrap_or(""),
+                )
+            } else {
+                return Err(format!("params格式错误: {}", params_str));
+            };
 
             db.execute_with_params(
                 "UPDATE testtb SET kind = ?, item = ?, data = ? WHERE id = ?",
