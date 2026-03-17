@@ -5,7 +5,7 @@
 //!
 //! 说明：此文件属于 axum78 业务层，不是 database 基类
 
-use datastate::{DataSync, BaseState, TableConfig};
+use database::{DataSync, BaseState, TableConfig};
 use serde::{Deserialize, Serialize};
 
 /// 用户表创建SQL
