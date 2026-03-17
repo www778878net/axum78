@@ -248,7 +248,7 @@ async fn test_all_plans() {
     println!("本地数据库: 已重建testtb表");
     
     // 启动服务器（服务器端使用远程数据库路径）
-    let app = axum78::create_router();
+    let app = axum78::create_router().into_make_service();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3780").await.expect("绑定端口失败");
     let _server_handle = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("服务器启动失败");
