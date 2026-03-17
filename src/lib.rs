@@ -15,7 +15,7 @@ pub mod apitest;
 pub mod apisvc;
 pub mod apigame;
 
-pub use context::{UpInfo, RequestBody, Context, VerifyResult, verify_sid, get_lovers_state, LoversDataState, LOVERS_CREATE_SQL, LOVERS_AUTH_CREATE_SQL, AuthConfig, get_auth_config, sid_auth_middleware};
+pub use context::{UpInfo, RequestBody, Context, VerifyResult, get_lovers_state, LoversDataState, LOVERS_CREATE_SQL, LOVERS_AUTH_CREATE_SQL, AuthConfig, get_auth_config, sid_auth_middleware};
 pub use response::{ApiResponse, ApiError};
 pub use base_api::{BaseApi, TableConfig};
 pub use router::{ApiRouter, ApiRouter78, Controller78};
