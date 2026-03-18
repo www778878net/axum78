@@ -11,8 +11,71 @@ use base64::Engine;
 use database::datastate::TestTb;
 use database::next_id_string;
 use prost::Message;
-use axum78::apitest::testmenu::testtb::{testtb, testtbItem}; use axum78::apisvc::backsvc::synclog::{SynclogItem, SynclogBatch};
 
+#[derive(Clone, PartialEq, Message)]
+use axum78::apitest::testmenu::testtb;
+pub struct testtbItem {
+    #[prost(string, tag = "1")]
+    pub id: String,
+    #[prost(int32, tag = "2")]
+    pub idpk: i32,
+    #[prost(string, tag = "3")]
+    pub cid: String,
+    #[prost(string, tag = "4")]
+    pub kind: String,
+    #[prost(string, tag = "5")]
+    pub item: String,
+    #[prost(string, tag = "6")]
+    pub data: String,
+    #[prost(string, tag = "7")]
+    pub upby: String,
+    #[prost(string, tag = "8")]
+    pub uptime: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct testtb {
+    #[prost(message, repeated, tag = "1")]
+    pub items: Vec<testtbItem>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct SynclogItem {
+    #[prost(string, tag = "1")]
+    pub id: String,
+    #[prost(string, tag = "2")]
+    pub apisys: String,
+    #[prost(string, tag = "3")]
+    pub apimicro: String,
+    #[prost(string, tag = "4")]
+    pub apiobj: String,
+    #[prost(string, tag = "5")]
+    pub tbname: String,
+    #[prost(string, tag = "6")]
+    pub action: String,
+    #[prost(string, tag = "7")]
+    pub cmdtext: String,
+    #[prost(string, tag = "8")]
+    pub params: String,
+    #[prost(string, tag = "9")]
+    pub idrow: String,
+    #[prost(string, tag = "10")]
+    pub worker: String,
+    #[prost(int32, tag = "11")]
+    pub synced: i32,
+    #[prost(string, tag = "12")]
+    pub cmdtextmd5: String,
+    #[prost(string, tag = "13")]
+    pub cid: String,
+    #[prost(string, tag = "14")]
+    pub upby: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct SynclogBatch {
+    #[prost(message, repeated, tag = "1")]
+    pub items: Vec<SynclogItem>,
+}
 
 const SERVER_URL: &str = "http://127.0.0.1:3780";
 const CID: &str = "test-cid-789";
@@ -223,7 +286,7 @@ async fn test_all_plans() {
              axum::extract::Extension(verify_result): axum::extract::Extension<axum78::VerifyResult>,
              axum::extract::Extension(up): axum::extract::Extension<axum78::UpInfo>| async move {
                 if apiobj == "testtb" {
-                    let (status, resp) = axum78::apitest::testmenu::testtb::handle(&apifun, up, &verify_result).await;
+                    let (status, resp) = testtb::handle(&apifun, up, &verify_result).await;
                     (status, [(axum::http::header::CONTENT_TYPE, "application/json")], resp)
                 } else {
                     let (status, resp) = axum78::apisvc::backsvc::synclog::handle(&apifun.to_lowercase(), up).await;
