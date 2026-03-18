@@ -9,9 +9,15 @@ use axum::{
     response::{IntoResponse, Response},
     middleware::Next,
 };
-use base::{UpInfo, Response as BaseResponse, ProjectPath};
+use base::{UpInfo, Response as BaseResponse, ProjectPath, MyLogger};
 use crate::{get_lovers_state, LoversDataState, VerifyResult};
 use std::collections::HashSet;
+
+static LOGGER: std::sync::OnceLock<MyLogger> = std::sync::OnceLock::new();
+
+fn get_logger() -> &'static MyLogger {
+    LOGGER.get_or_init(|| MyLogger::new("auth_middleware", 7))
+}
 
 /// 认证配置
 #[derive(Debug, Clone, Default)]
@@ -100,22 +106,41 @@ pub fn get_auth_config() -> &'static AuthConfig {
 /// - 二级：apisys/apimicro（如 apitest/test）
 /// - 三级：apisys/apimicro/apiobj（如 apiuser/user/login）
 pub async fn sid_auth_middleware(
-    AxumPath((apisys, apimicro, apiobj, apifun)): AxumPath<(String, String, String, String)>,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    let logger = get_logger();
     let auth_config = get_auth_config();
+    
+    // 从URI中解析路径参数
+    let path = request.uri().path();
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    
+    let (apisys, apimicro, apiobj, apifun) = match parts.as_slice() {
+        [apisys, apimicro, apiobj, apifun] => (apisys.to_string(), apimicro.to_string(), apiobj.to_string(), apifun.to_string()),
+        _ => {
+            logger.error(&format!("Invalid path: {}", path));
+            let resp = BaseResponse::fail("Invalid path", 400);
+            return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default())).into_response();
+        }
+    };
     
     let apisys_lower = apisys.to_lowercase();
     let apimicro_lower = apimicro.to_lowercase();
     let apiobj_lower = apiobj.to_lowercase();
     
+    logger.detail(&format!("sid_auth_middleware: {}/{}/{}/{}", apisys, apimicro, apiobj, apifun));
+    
     // 基础访问控制
     if apifun.starts_with('_') || !apisys_lower.starts_with("api") || apimicro_lower.starts_with("dll") {
+        logger.error(&format!("Access denied: {}/{}/{}/{}", apisys, apimicro, apiobj, apifun));
         let resp = BaseResponse::fail("Access denied", 403);
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default())).into_response();
     }
 
+    // 保存URI，因为into_body()会消费request
+    let uri = request.uri().clone();
+    
     // 解析请求体
     let body_bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
         .await
@@ -124,6 +149,7 @@ pub async fn sid_auth_middleware(
     let up: UpInfo = match serde_json::from_slice(&body_bytes) {
         Ok(u) => u,
         Err(e) => {
+            logger.error(&format!("解析请求失败: {}", e));
             let resp = BaseResponse::fail(&format!("解析请求失败: {}", e), -1);
             return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default())).into_response();
         }
@@ -131,9 +157,13 @@ pub async fn sid_auth_middleware(
 
     // 检查白名单
     if auth_config.should_skip(&apisys_lower, &apimicro_lower, &apiobj_lower) {
-        let mut request = Request::new(axum::body::Body::from(body_bytes));
-        request.extensions_mut().insert(up);
-        return next.run(request).await;
+        logger.detail(&format!("跳过认证: {}/{}/{}", apisys_lower, apimicro_lower, apiobj_lower));
+        let verify_result = VerifyResult::new(&up.cid, &up.uid, &up.uname);
+        let mut builder = Request::new(axum::body::Body::from(body_bytes));
+        *builder.uri_mut() = uri;
+        builder.extensions_mut().insert(verify_result);
+        builder.extensions_mut().insert(up);
+        return next.run(builder).await;
     }
 
     
@@ -141,15 +171,17 @@ pub async fn sid_auth_middleware(
     let verify_result = match lovers_state.verify_sid(&up.sid) {
         Ok(v) => v,
         Err(e) => {
+            logger.error(&format!("验证失败: {}", e));
             let resp = BaseResponse::fail(&e, -1);
             return (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default())).into_response();
         }
     };
 
     
-    let mut request = Request::new(axum::body::Body::from(body_bytes));
-    request.extensions_mut().insert(verify_result);
-    request.extensions_mut().insert(up);
+    let mut builder = Request::new(axum::body::Body::from(body_bytes));
+    *builder.uri_mut() = uri;
+    builder.extensions_mut().insert(verify_result);
+    builder.extensions_mut().insert(up);
     
-    next.run(request).await
+    next.run(builder).await
 }
