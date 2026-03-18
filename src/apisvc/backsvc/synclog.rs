@@ -217,12 +217,13 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
             };
             let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let upby = row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            
-            println!("[doWork] 处理记录: idpk={}, tbname={}, action={}, idrow={}", idpk, tbname, action, idrow);
-            
-            let result = process_synclog_item(db, &upby, &tbname, &action, &params_str, &idrow);
+            let synclog_uptime = row.get("uptime").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
+            println!("[doWork] 处理记录: idpk={}, tbname={}, action={}, idrow={}", idpk, tbname, action, idrow);
+
+            let result = process_synclog_item(db, &upby, &tbname, &action, &params_str, &idrow, &synclog_uptime);
             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
             match result {
                 Ok(_) => {
                     println!("[doWork] 处理成功: idpk={}", idpk);
@@ -358,6 +359,7 @@ fn process_synclog_item(
     action: &str,
     params_str: &str,
     idrow: &str,
+    synclog_uptime: &str,
 ) -> Result<(), String> {
     let params: Vec<Value> = serde_json::from_str(params_str).unwrap_or_default();
 
@@ -398,12 +400,17 @@ fn process_synclog_item(
             };
 
             let new_id = if id.is_empty() { database::next_id_string() } else { id.to_string() };
-            
-            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            
+
+            // 优先使用synclog中的uptime，否则使用当前时间
+            let uptime = if !synclog_uptime.is_empty() {
+                synclog_uptime.to_string()
+            } else {
+                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+            };
+
             db.execute_with_params(
                 "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                &[&new_id as &dyn rusqlite::ToSql, &cid, &kind, &item, &data, &upby, &now],
+                &[&new_id as &dyn rusqlite::ToSql, &cid, &kind, &item, &data, &upby, &uptime],
             ).map_err(|e| e)
         }
         "update" => {
@@ -437,10 +444,11 @@ fn process_synclog_item(
             } else {
                 return Err(format!("params格式错误: {}", params_str));
             };
+            let record_uptime = if !synclog_uptime.is_empty() { synclog_uptime.to_string() } else { chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string() };
 
             db.execute_with_params(
-                "UPDATE testtb SET kind = ?, item = ?, data = ? WHERE id = ?",
-                &[&kind as &dyn rusqlite::ToSql, &item, &data, &id],
+                "UPDATE testtb SET kind = ?, item = ?, data = ?, upby = ?, uptime = ? WHERE id = ?",
+                &[&kind as &dyn rusqlite::ToSql, &item, &data, &upby, &record_uptime, &id],
             ).map_err(|e| e)
         }
         "delete" => {
