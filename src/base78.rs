@@ -60,21 +60,21 @@ impl Base78 {
         // 从jsdata中解析参数
         let pars_data: Vec<String> = if let Some(jsdata_str) = &up.jsdata {
             if let Ok(data) = serde_json::from_str::<Vec<String>>(jsdata_str) {
-                pars_data = data;
+                data
             } else {
-                pars_data = vec![];
+                vec![]
             }
         } else {
-            pars_data = vec![];
-        }
+            vec![]
+        };
         
         let mut where_clause = format!("{} = ?", self.uidcid);
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(up.cid.clone())];
+        let mut params: Vec<String> = vec![up.cid.clone()];
         
         for (i, col) in colp.iter().enumerate() {
             if i < pars_data.len() {
                 where_clause.push_str(&format!(" AND {} = ?", col));
-                params.push(Box::new(pars_data[i].clone()));
+                params.push(pars_data[i].clone());
             }
         }
         
@@ -85,7 +85,7 @@ impl Base78 {
         
         self.logger.detail(&format!("执行SQL: {}", sql));
         
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
         self.datastate.do_get(&sql, &params_refs, "base78", "get")
     }
 
