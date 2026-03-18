@@ -5,6 +5,7 @@
 //! 请求格式: UpInfo (JSON)
 //! 响应格式: Response (JSON)
 
+pub mod base78;
 pub mod context;
 pub mod response;
 pub mod base_api;
@@ -15,6 +16,7 @@ pub mod apitest;
 pub mod apisvc;
 pub mod apigame;
 
+pub use base78::{Base78, CidBase78};
 pub use context::{UpInfo, RequestBody, Context, VerifyResult, get_lovers_state, LoversDataState, LOVERS_CREATE_SQL, LOVERS_AUTH_CREATE_SQL, AuthConfig, get_auth_config, sid_auth_middleware};
 pub use response::{ApiResponse, ApiError};
 pub use base_api::{BaseApi, TableConfig};

@@ -1,9 +1,9 @@
 //! UpInfo 模块 - 请求上下文
 
-mod context;
-mod verify;
-mod auth_middleware;
-mod lovers_state;
+pub mod auth_middleware;
+pub mod context;
+pub mod verify;
+pub mod lovers_state;
 
 pub use context::{UpInfo, RequestBody};
 pub use verify::get_lovers_state;
