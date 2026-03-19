@@ -12,6 +12,7 @@ use axum::{
 use base::{UpInfo, Response as BaseResponse, ProjectPath, MyLogger};
 use crate::{get_lovers_state, LoversDataState, VerifyResult};
 use std::collections::HashSet;
+use serde::{Serialize, Deserialize};
 
 static LOGGER: std::sync::OnceLock<MyLogger> = std::sync::OnceLock::new();
 
@@ -99,6 +100,70 @@ pub fn get_auth_config() -> &'static AuthConfig {
     AUTH_CONFIG.get_or_init(AuthConfig::load)
 }
 
+/// 最小请求体（用于解析客户端请求）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct MinimalRequest {
+    #[serde(default)]
+    pub sid: String,
+    #[serde(default)]
+    pub cid: String,
+    #[serde(default)]
+    pub uid: String,
+    #[serde(default)]
+    pub uname: String,
+    #[serde(default)]
+    pub getstart: i32,
+    #[serde(default)]
+    pub getnumber: i32,
+    #[serde(default)]
+    pub order: String,
+    #[serde(default)]
+    pub bcid: String,
+    #[serde(default)]
+    pub mid: String,
+    #[serde(default)]
+    pub jsdata: Option<String>,
+    #[serde(default)]
+    pub bytedata: Option<Vec<u8>>,
+}
+
+impl Default for MinimalRequest {
+    fn default() -> Self {
+        Self {
+            sid: String::new(),
+            cid: String::new(),
+            uid: String::new(),
+            uname: "guest".to_string(),
+            getstart: 0,
+            getnumber: 15,
+            order: "idpk desc".to_string(),
+            bcid: String::new(),
+            mid: String::new(),
+            jsdata: None,
+            bytedata: None,
+        }
+    }
+}
+
+impl From<MinimalRequest> for UpInfo {
+    fn from(min: MinimalRequest) -> Self {
+        let mut up = UpInfo::new();
+        up.sid = min.sid;
+        up.cid = min.cid;
+        up.uid = min.uid;
+        up.uname = min.uname;
+        up.getstart = min.getstart;
+        up.getnumber = min.getnumber;
+        up.order = min.order;
+        up.bcid = min.bcid;
+        up.mid = min.mid;
+        up.jsdata = min.jsdata;
+        up.bytedata = min.bytedata;
+        up
+    }
+}
+
 /// SID 验证中间件（路由层）
 /// 
 /// 白名单规则（三级）：
@@ -147,8 +212,9 @@ pub async fn sid_auth_middleware(
         .await
         .unwrap_or_default();
     
-    let up: UpInfo = match serde_json::from_slice(&body_bytes) {
-        Ok(u) => u,
+    // 使用最小请求体解析，然后转换为UpInfo
+    let up: UpInfo = match serde_json::from_slice::<MinimalRequest>(&body_bytes) {
+        Ok(min) => min.into(),
         Err(e) => {
             logger.error(&format!("解析请求失败: {}", e));
             let resp = BaseResponse::fail(&format!("解析请求失败: {}", e), -1);
