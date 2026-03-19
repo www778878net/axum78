@@ -44,9 +44,49 @@ impl Base78 {
     }
 
     /// 检查管理员权限
-    pub fn check_admin_permission(&self, _up: &UpInfo) -> Result<(), String> {
+    pub fn check_admin_permission(&self, up: &UpInfo) -> Result<(), String> {
         if self.isadmin {
             // TODO: 实现管理员权限检查
+            // 需要从配置中读取cidvps和cidmy
+            // if up.cid != config.get('cidvps') && up.cid != config.get('cidmy') && !up.uname.contains("sys") {
+            //     return Err("只有管理员可以操作".to_string());
+            // }
+        }
+        Ok(())
+    }
+
+    /// 验证参数数量
+    pub fn validate_params(&self, up: &UpInfo, required_count: usize) -> Result<Vec<String>, String> {
+        // 从jsdata中解析参数
+        let pars_data: Vec<String> = if let Some(jsdata_str) = &up.jsdata {
+            if let Ok(data) = serde_json::from_str::<Vec<String>>(jsdata_str) {
+                data
+            } else {
+                return Err("参数格式错误".to_string());
+            }
+        } else {
+            return Err("缺少参数".to_string());
+        };
+        
+        if pars_data.len() < required_count {
+            return Err(format!("参数数量不足，需要{}个参数，实际{}个", required_count, pars_data.len()));
+        }
+        
+        Ok(pars_data)
+    }
+
+    /// 验证必填字段
+    pub fn validate_required(&self, value: &str, field_name: &str) -> Result<(), String> {
+        if value.is_empty() {
+            return Err(format!("{}不能为空", field_name));
+        }
+        Ok(())
+    }
+
+    /// 验证数字范围
+    pub fn validate_range(&self, value: i32, min: i32, max: i32, field_name: &str) -> Result<(), String> {
+        if value < min || value > max {
+            return Err(format!("{}必须在{}到{}之间", field_name, min, max));
         }
         Ok(())
     }
@@ -127,9 +167,10 @@ impl Base78 {
     }
 
     /// 执行自定义查询
-    pub async fn do_get(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) -> Result<Vec<HashMap<String, Value>>, String> {
+    pub async fn do_get(&self, sql: &str, params: Vec<String>) -> Result<Vec<HashMap<String, Value>>, String> {
         self.logger.detail(&format!("执行SQL: {}", sql));
-        self.datastate.do_get(sql, params, "base78", "do_get")
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        self.datastate.do_get(sql, &params_refs, "base78", "do_get")
     }
 }
 
@@ -169,7 +210,7 @@ impl CidBase78 {
         self.base.m_del(up, id).await
     }
 
-    pub async fn do_get(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) -> Result<Vec<HashMap<String, Value>>, String> {
+    pub async fn do_get(&self, sql: &str, params: Vec<String>) -> Result<Vec<HashMap<String, Value>>, String> {
         self.base.do_get(sql, params).await
     }
 }
