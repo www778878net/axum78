@@ -9,18 +9,22 @@
 //! - apimicro 不能以 "dll" 开头
 
 use axum::{
+    body::Bytes,
     Router,
-    routing::post,
+    routing::{any, post},
     extract::{Path, State, Json as AxumJson},
     response::IntoResponse,
-    http::StatusCode,
+    http::{header, StatusCode},
+    middleware,
+    Extension,
 };
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{ApiResponse, UpInfo, RequestBody};
+use crate::{ApiResponse, UpInfo, RequestBody, Response, VerifyResult, sid_auth_middleware};
+use tower_http::cors::{CorsLayer, Any};
 
 /// 控制器 Trait - 实现此 trait 来定义 API 处理器
 #[async_trait]
@@ -143,6 +147,56 @@ async fn api_handler(
     let mut resp = ApiResponse::success(result);
     resp.kind = up.backtype;
     (StatusCode::OK, axum::Json(resp))
+}
+
+/// 创建主路由器 (带认证中间件)
+pub fn create_router() -> Router<()> {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+    
+    // API路由组 (需要认证)
+    let api_routes = Router::new()
+        .route("/:apisys/:apimicro/:apiobj/:apifun", any(root_api_handler))
+        .layer(middleware::from_fn(sid_auth_middleware));
+    
+    Router::new()
+        .route("/health", axum::routing::get(health_handler))
+        .merge(api_routes)
+        .layer(cors)
+}
+
+async fn health_handler() -> impl IntoResponse {
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain")], "OK")
+}
+
+async fn root_api_handler(
+    Extension((apisys, apimicro, apiobj, apifun)): Extension<(String, String, String, String)>,
+    Extension(verify_result): Extension<VerifyResult>,
+    Extension(up): Extension<UpInfo>,
+) -> impl IntoResponse {
+    let apisys_lower = apisys.to_lowercase();
+    let apimicro_lower = apimicro.to_lowercase();
+    let apifun_lower = apifun.to_lowercase();
+
+    let (status, resp_bytes) = match (apisys_lower.as_str(), apimicro_lower.as_str(), apiobj.as_str()) {
+        ("apitest", "testmenu", "testtb") => {
+            crate::apitest::testmenu::testtb::handle(&apifun_lower, up, &verify_result).await
+        }
+        ("apisvc", "backsvc", "synclog") => {
+            crate::apisvc::backsvc::synclog::handle(&apifun_lower, up).await
+        }
+        ("apigame", "mock", "game_state") => {
+            crate::apigame::mock::game_state::handle(&apifun_lower, up).await
+        }
+        _ => {
+            let resp = Response::fail(&format!("API not found: {}/{}/{}/{}", apisys, apimicro, apiobj, apifun), 404);
+            (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+        }
+    };
+
+    (status, [(header::CONTENT_TYPE, "application/json")], resp_bytes)
 }
 
 /// 保留旧的 ApiRouter 别名 (向后兼容)

@@ -116,11 +116,12 @@ pub async fn sid_auth_middleware(
     let path = request.uri().path();
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     
+ 
+    
     let (apisys, apimicro, apiobj, apifun) = match parts.as_slice() {
         [apisys, apimicro, apiobj, apifun] => (apisys.to_string(), apimicro.to_string(), apiobj.to_string(), apifun.to_string()),
         _ => {
-            logger.error(&format!("Invalid path: {}", path));
-            let resp = BaseResponse::fail("Invalid path", 400);
+            let resp = BaseResponse::fail(&format!("Invalid path: {}", path), 400);
             return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default())).into_response();
         }
     };
@@ -163,6 +164,7 @@ pub async fn sid_auth_middleware(
         *builder.uri_mut() = uri;
         builder.extensions_mut().insert(verify_result);
         builder.extensions_mut().insert(up);
+        builder.extensions_mut().insert((apisys, apimicro, apiobj, apifun));
         return next.run(builder).await;
     }
 
@@ -182,6 +184,7 @@ pub async fn sid_auth_middleware(
     *builder.uri_mut() = uri;
     builder.extensions_mut().insert(verify_result);
     builder.extensions_mut().insert(up);
+    builder.extensions_mut().insert((apisys, apimicro, apiobj, apifun));
     
     next.run(builder).await
 }
