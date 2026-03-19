@@ -92,15 +92,22 @@ impl Default for ApiRouter78 {
 /// 4级路由 API 处理器
 async fn api_handler(
     State(state): State<Arc<RouterState>>,
-    Path((apisys, apimicro, apiobj, apifun)): Path<(String, String, String, String)>,
-    AxumJson(body): AxumJson<RequestBody>,
+    Extension((apisys, apimicro, apiobj, apifun)): Extension<(String, String, String, String)>,
+    Extension(verify_result): Extension<VerifyResult>,
+    Extension(mut up): Extension<UpInfo>,
 ) -> impl IntoResponse {
+    // ========== 填充UpInfo ==========
+    up.cid = verify_result.cid.clone();
+    up.uid = verify_result.uid.clone();
+    up.uname = verify_result.uname.clone();
+
     // ========== 安全校验 ==========
     // apifun 不能以 "_" 开头 (私有方法)
     if apifun.starts_with('_') {
         return (
             StatusCode::FORBIDDEN,
-            axum::Json(ApiResponse::fail("Access denied: private method", -4)),
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from(serde_json::to_string(&ApiResponse::fail("Access denied: private method", -4)).unwrap_or_default()),
         );
     }
 
@@ -108,7 +115,8 @@ async fn api_handler(
     if !apisys.to_lowercase().starts_with("api") {
         return (
             StatusCode::FORBIDDEN,
-            axum::Json(ApiResponse::fail("Access denied: invalid api system", -4)),
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from(serde_json::to_string(&ApiResponse::fail("Access denied: invalid api system", -4)).unwrap_or_default()),
         );
     }
 
@@ -116,7 +124,8 @@ async fn api_handler(
     if apimicro.to_lowercase().starts_with("dll") {
         return (
             StatusCode::FORBIDDEN,
-            axum::Json(ApiResponse::fail("Access denied: dll not allowed", -4)),
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from(serde_json::to_string(&ApiResponse::fail("Access denied: dll not allowed", -4)).unwrap_or_default()),
         );
     }
 
@@ -127,19 +136,12 @@ async fn api_handler(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                axum::Json(ApiResponse::fail(&format!("Controller not found: {}", controller_path), -1)),
+                [(header::CONTENT_TYPE, "application/json")],
+                Bytes::from(serde_json::to_string(&ApiResponse::fail(&format!("Controller not found: {}", controller_path), -1)).unwrap_or_default()),
             );
         }
     };
 
-    // ========== 构建 UpInfo ==========
-    let mut up = UpInfo::new();
-    // 从 RequestBody 填充基本字段
-    up.sid = body.sid.clone();
-    up.getnumber = body.number.unwrap_or(0) as i32;
-    up.getstart = body.start.unwrap_or(0) as i32;
-
-    
     // ========== 调用方法 ==========
     let result = controller.call(&mut up, &apifun).await;
 
@@ -147,13 +149,17 @@ async fn api_handler(
     if up.res != 0 {
         return (
             StatusCode::BAD_REQUEST,
-            axum::Json(ApiResponse::fail(&up.errmsg, up.res)),
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from(serde_json::to_string(&ApiResponse::fail(&up.errmsg, up.res)).unwrap_or_default()),
         );
     }
 
-    let mut resp = ApiResponse::success(result);
-    resp.kind = up.backtype;
-    (StatusCode::OK, axum::Json(resp))
+    let resp = ApiResponse::success(result);
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        Bytes::from(serde_json::to_string(&resp).unwrap_or_default()),
+    )
 }
 
 /// 创建主路由器 (带认证中间件)
