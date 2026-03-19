@@ -194,6 +194,9 @@ async fn root_api_handler(
         ("apigame", "mock", "game_state") => {
             crate::apigame::mock::game_state::handle(&apifun_lower, up).await
         }
+        ("apimes", "wework", "auth") => {
+            crate::apimes::wework::auth::handle(&apifun_lower, up).await
+        }
         _ => {
             let resp = Response::fail(&format!("API not found: {}/{}/{}/{}", apisys, apimicro, apiobj, apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))

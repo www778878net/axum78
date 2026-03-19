@@ -15,6 +15,7 @@ pub mod server;
 pub mod apitest;
 pub mod apisvc;
 pub mod apigame;
+pub mod apimes;
 
 pub use base78::{Base78, CidBase78};
 pub use context::{UpInfo, RequestBody, Context, VerifyResult, get_lovers_state, LoversDataState, LOVERS_CREATE_SQL, LOVERS_AUTH_CREATE_SQL, AuthConfig, get_auth_config, sid_auth_middleware};
