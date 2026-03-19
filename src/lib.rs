@@ -54,9 +54,7 @@ impl AppState {
     }
 }
 
-pub fn create_router() -> AxumRouter<AppState> {
-    let state = Arc::new(AppState::new());
-    
+pub fn create_router() -> AxumRouter<()> {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
@@ -66,7 +64,6 @@ pub fn create_router() -> AxumRouter<AppState> {
         .route("/:apisys/:apimicro/:apiobj/:apifun", any(api_handler))
         .layer(middleware::from_fn(sid_auth_middleware))
         .route("/health", axum::routing::get(health_handler))
-        .with_state(state)
         .layer(cors)
 }
 

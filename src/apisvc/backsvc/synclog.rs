@@ -59,8 +59,7 @@ pub struct SynclogBatch {
 }
 
 pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
-    // 服务器端使用远程数据库路径
-    let remote_db_path = "c:\\7788\\rustdemo\\rustdemo\\crates\\axum78\\tmp\\data\\remote.db";
+    let remote_db_path = "docs/config/remote.db";
     let db = match LocalDB::with_path(remote_db_path) {
         Ok(d) => d,
         Err(e) => {
