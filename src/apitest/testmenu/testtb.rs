@@ -52,6 +52,7 @@ pub struct testtb {
 /// verify_result: 中间件已经验证过的结果，包含 cid、uid、uname
 pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (StatusCode, Bytes) {
     match apifun.to_lowercase().as_str() {
+        "health" => health().await,
         "get" => get(&up, verify_result).await,
         "test" => test(&up).await,
         _ => {
@@ -59,6 +60,14 @@ pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
         }
     }
+}
+
+/// HEALTH - 健康检查
+async fn health() -> (StatusCode, Bytes) {
+    let resp = Response::success_json(&serde_json::json!({
+        "status": "OK"
+    }));
+    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
 /// TEST - 测试接口

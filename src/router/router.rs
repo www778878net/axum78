@@ -156,19 +156,10 @@ pub fn create_router() -> Router<()> {
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
     
-    // API路由组 (需要认证)
-    let api_routes = Router::new()
-        .route("/:apisys/:apimicro/:apiobj/:apifun", any(root_api_handler))
-        .layer(middleware::from_fn(sid_auth_middleware));
-    
     Router::new()
-        .route("/health", axum::routing::get(health_handler))
-        .merge(api_routes)
+        .route("/:apisys/:apimicro/:apiobj/:apifun", any(root_api_handler))
+        .layer(middleware::from_fn(sid_auth_middleware))
         .layer(cors)
-}
-
-async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain")], "OK")
 }
 
 async fn root_api_handler(
