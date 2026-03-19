@@ -64,14 +64,21 @@ impl ApiRouter78 {
         self
     }
 
-    /// 构建最终路由
+    /// 构建最终路由（带CORS和认证中间件）
     pub fn build(self) -> Router {
         let state = Arc::new(RouterState {
             controllers: self.controllers,
         });
 
+        let cors = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
+            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+
         Router::new()
-            .route("/:apisys/:apimicro/:apiobj/:apifun", post(api_handler))
+            .route("/:apisys/:apimicro/:apiobj/:apifun", any(api_handler))
+            .layer(middleware::from_fn(sid_auth_middleware))
+            .layer(cors)
             .with_state(state)
     }
 }
