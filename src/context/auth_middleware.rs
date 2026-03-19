@@ -239,9 +239,8 @@ pub async fn sid_auth_middleware(
     let verify_result = match lovers_state.verify_sid(&up.sid) {
         Ok(v) => v,
         Err(e) => {
-            logger.error(&format!("验证失败: {}", e));
-            let resp = BaseResponse::fail(&e, -1);
-            return (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default())).into_response();
+            logger.detail(&format!("验证失败，使用GUEST身份: {}", e));
+            VerifyResult::new("GUEST000-8888-8888-8888-GUEST00GUEST", "", "guest")
         }
     };
 
