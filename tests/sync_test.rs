@@ -186,7 +186,7 @@ async fn test_all_plans() {
     println!("默认数据库: 已初始化 lovers 和 lovers_auth 表");
 
     // 远程数据库路径（服务器端）
-    let remote_db_path = "c:\\7788\\rustdemo\\rustdemo\\crates\\axum78\\tmp\\data\\remote.db";
+    let remote_db_path = "docs/config/remote.db";
 
     // 删除旧表并重新创建（远程数据库）
     let remote_testtb = TestTb::with_db_path(remote_db_path);
@@ -197,7 +197,7 @@ async fn test_all_plans() {
 
     // 删除旧表并重新创建（本地数据库）
     // 使用 with_db_path 方法，避免使用单例模式
-    let local_db_path = "c:\\7788\\rustdemo\\rustdemo\\docs\\config\\local.db";
+    let local_db_path = "docs/config/local.db";
     let local_testtb = TestTb::with_db_path(local_db_path);
     let _ = local_testtb.db.execute("DROP TABLE IF EXISTS testtb");
     let _ = local_testtb.db.execute("DELETE FROM synclog WHERE tbname='testtb'");

@@ -11,6 +11,14 @@ memory78/memory78.db
 *-shm
 *-journal
 
+# 配置文件（可能包含敏感信息）
+*.ini
+!*.example.ini
+docs/config/
+
+# 数据库文件
+*.db
+
 # Worker 配置（每台机器不同）
 docs/config/worker.txt
 node_modules/

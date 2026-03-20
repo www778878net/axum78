@@ -85,7 +85,7 @@ async fn get(up: &UpInfo, verify_result: &VerifyResult) -> (StatusCode, Bytes) {
     let expected_cid = &verify_result.cid;
     
     // 服务器端使用远程数据库路径
-    let remote_db_path = "c:\\7788\\rustdemo\\rustdemo\\crates\\axum78\\tmp\\data\\remote.db";
+    let remote_db_path = "docs/config/remote.db";
     let testtb_state = TestTb::with_db_path(remote_db_path);
     
     let rows = match testtb_state.mlist("testtb", up.getnumber as i32, "API查询") {
