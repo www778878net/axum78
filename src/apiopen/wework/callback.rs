@@ -14,7 +14,7 @@ use base::Response;
 use sha1::{Sha1, Digest};
 use std::collections::HashMap;
 use crate::get_wework_config;
-use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use base64::{Engine as _, engine::general_purpose};
 
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
@@ -364,7 +364,7 @@ pub fn build_text_reply(to_user: &str, from_user: &str, content: &str) -> String
 
 /// Encrypt message for WeWork reply
 fn encrypt_message(encoding_aes_key: &str, corp_id: &str, msg: &str) -> Result<String, String> {
-    use aes::cipher::{KeyIvInit, BlockEncrypt};
+    use aes::cipher::{KeyIvInit, BlockEncryptMut, block_padding::Pkcs7};
     use base64::{engine::general_purpose::STANDARD, Engine};
     use rand::Rng;
     
@@ -385,23 +385,29 @@ fn encrypt_message(encoding_aes_key: &str, corp_id: &str, msg: &str) -> Result<S
     plaintext.extend_from_slice(msg_bytes);
     plaintext.extend_from_slice(corp_id_bytes);
     
-    // PKCS7 padding
-    let block_size = 32; // AES block size
-    let pad_len = block_size - (plaintext.len() % block_size);
-    plaintext.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+    let pt_len = plaintext.len();
+    
+    // Add padding space (AES block size is 16)
+    let block_size = 16usize;
+    let padded_len = ((pt_len / block_size) + 1) * block_size;
+    plaintext.resize(padded_len, 0);
     
     // AES-256-CBC encrypt with key's first 16 bytes as IV
     let iv = &key[..16];
     let cipher = Aes256CbcEnc::new_from_slices(&key, iv)
         .map_err(|e| format!("Create cipher failed: {}", e))?;
     
-    let ciphertext = cipher.encrypt_padded_vec_mut::<Pkcs7>(&plaintext);
+    // Encrypt with PKCS7 padding
+    let ciphertext = cipher.encrypt_padded_mut::<Pkcs7>(&mut plaintext, pt_len)
+        .map_err(|e| format!("Encrypt failed: {}", e))?;
     
-    Ok(STANDARD.encode(&ciphertext))
+    Ok(STANDARD.encode(ciphertext))
 }
 
 /// Build encrypted reply XML
 fn build_encrypted_reply(token: &str, encoding_aes_key: &str, corp_id: &str, to_user: &str, from_user: &str, content: &str) -> Result<String, String> {
+    use rand::Rng;
+    
     let timestamp = chrono::Utc::now().timestamp();
     let nonce: u32 = rand::thread_rng().gen();
     
@@ -421,7 +427,9 @@ fn build_encrypted_reply(token: &str, encoding_aes_key: &str, corp_id: &str, to_
     let encrypted = encrypt_message(encoding_aes_key, corp_id, &inner_msg)?;
     
     // Generate signature
-    let mut arr = vec![token, &timestamp.to_string(), &nonce.to_string(), &encrypted];
+    let ts_str = timestamp.to_string();
+    let nonce_str = nonce.to_string();
+    let mut arr = vec![token, &ts_str, &nonce_str, &encrypted];
     arr.sort();
     let combined = arr.join("");
     let mut hasher = Sha1::new();
