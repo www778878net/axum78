@@ -141,6 +141,8 @@ async fn receive_message(params: &std::collections::HashMap<String, String>, bod
     let timestamp = params.get("timestamp").map(|s| s.as_str()).unwrap_or("");
     let nonce = params.get("nonce").map(|s| s.as_str()).unwrap_or("");
     
+    tracing::info!("WeWork message params: msg_signature={}, timestamp={}, nonce={}", msg_signature, timestamp, nonce);
+    
     // Parse message body
     let body_str = match String::from_utf8(body.to_vec()) {
         Ok(s) => s,
@@ -152,8 +154,11 @@ async fn receive_message(params: &std::collections::HashMap<String, String>, bod
     
     tracing::info!("WeWork message received: {}", body_str);
     
-    // Verify signature (消息接收不需要echostr)
-    if !verify_signature(&config.token, timestamp, nonce, msg_signature, None) {
+    // Extract Encrypt tag for signature verification
+    let encrypt_content = extract_encrypt_tag(&body_str).unwrap_or("");
+    
+    // Verify signature (消息接收需要包含 encrypt 内容)
+    if !verify_signature(&config.token, timestamp, nonce, msg_signature, Some(encrypt_content)) {
         tracing::error!("WeWork message verify failed: invalid signature");
         return (StatusCode::FORBIDDEN, [(axum::http::header::CONTENT_TYPE, "text/plain")], Bytes::from("Invalid signature".to_string()));
     }
@@ -240,25 +245,31 @@ pub struct WeWorkMessage {
 
 /// Parse XML message
 fn parse_message(xml: &str) -> Result<WeWorkMessage, String> {
-    // Simple XML parsing
+    // Simple XML parsing - handles both CDATA and plain text
     let get_tag = |tag: &str| -> Option<String> {
+        // Try CDATA first: <tag><![CDATA[value]]></tag>
+        let cdata_start = format!("<{}><![CDATA[", tag);
+        if let Some(s) = xml.find(&cdata_start) {
+            let start_idx = s + cdata_start.len();
+            if let Some(e) = xml[start_idx..].find("]]>") {
+                return Some(xml[start_idx..start_idx+e].to_string());
+            }
+        }
+        
+        // Try plain text: <tag>value</tag>
         let start = format!("<{}>", tag);
         let end = format!("</{}>", tag);
         if let Some(s) = xml.find(&start) {
             if let Some(e) = xml.find(&end) {
                 let start_idx = s + start.len();
                 if start_idx < e {
-                    return Some(xml[start_idx..e].to_string());
+                    let value = xml[start_idx..e].to_string();
+                    // Strip CDATA wrapper if present (for malformed XML)
+                    if value.starts_with("<![CDATA[") && value.ends_with("]]>") {
+                        return Some(value[9..value.len()-3].to_string());
+                    }
+                    return Some(value);
                 }
-            }
-        }
-        // Try CDATA
-        let cdata_start = format!("<{}><![CDATA[", tag);
-        let cdata_end = "]]></{}>";
-        if let Some(s) = xml.find(&cdata_start) {
-            let start_idx = s + cdata_start.len();
-            if let Some(e) = xml[start_idx..].find("]]>") {
-                return Some(xml[start_idx..start_idx+e].to_string());
             }
         }
         None
@@ -342,6 +353,8 @@ pub fn build_text_reply(to_user: &str, from_user: &str, content: &str) -> String
 /// Verify signature
 /// URL验证时需要包含 echostr，消息接收时不需要
 fn verify_signature(token: &str, timestamp: &str, nonce: &str, signature: &str, echostr: Option<&str>) -> bool {
+    tracing::info!("verify_signature: token={}, timestamp={}, nonce={}, signature={}, echostr={:?}", token, timestamp, nonce, signature, echostr);
+    
     let mut arr = vec![token, timestamp, nonce];
     if let Some(echo) = echostr {
         arr.push(echo);
@@ -353,7 +366,7 @@ fn verify_signature(token: &str, timestamp: &str, nonce: &str, signature: &str, 
     hasher.update(combined.as_bytes());
     let result = format!("{:x}", hasher.finalize());
     
-    tracing::debug!("Signature verification: combined={}, calculated={}, expected={}", combined, result, signature);
+    tracing::info!("Signature verification: combined={}, calculated={}, expected={}", combined, result, signature);
     
     result == signature
 }
@@ -362,23 +375,16 @@ fn verify_signature(token: &str, timestamp: &str, nonce: &str, signature: &str, 
 /// WeWork echostr format after decryption: random(16 bytes) + msg_len(4 bytes) + msg + corp_id
 fn decrypt_echostr(encoding_aes_key: &str, corp_id: &str, encrypted: &str) -> Result<String, String> {
     // Decode base64 key (43 chars -> 32 bytes)
-    // WeWork uses standard base64, 43 chars need padding
+    // WeWork uses non-standard base64 with invalid trailing bits
     let key_str = encoding_aes_key.trim();
     
-    tracing::debug!("Decoding key: len={}, key={}", key_str.len(), key_str);
+    tracing::info!("Decoding key: len={}, key={}", key_str.len(), key_str);
     
-    // Try different decode methods for base64 0.22
-    let key = if let Ok(k) = general_purpose::STANDARD.decode(key_str) {
-        k
-    } else if let Ok(k) = general_purpose::STANDARD_NO_PAD.decode(key_str.as_bytes()) {
-        k.to_vec()
-    } else {
-        // Use lenient decoder for WeWork's non-standard base64
-        decode_base64_lenient(key_str)
-            .map_err(|e| format!("Base64 decode key failed: {} (key_len={})", e, key_str.len()))?
-    };
+    // Use lenient decoder for WeWork's non-standard base64
+    let key = decode_base64_lenient(key_str)
+        .map_err(|e| format!("Base64 decode key failed: {}", e))?;
     
-    tracing::debug!("Key decoded: {} bytes", key.len());
+    tracing::info!("Key decoded: {} bytes", key.len());
     
     // Decode encrypted content
     let encrypted_bytes = general_purpose::STANDARD
@@ -441,15 +447,8 @@ fn decrypt_echostr(encoding_aes_key: &str, corp_id: &str, encrypted: &str) -> Re
 
 /// Decrypt message (AES-256-CBC)
 fn decrypt_message(encoding_aes_key: &str, encrypted: &str) -> Result<String, String> {
-    // Decode base64 key
-    let key_str = if encoding_aes_key.len() == 43 {
-        format!("{}=", encoding_aes_key)
-    } else {
-        encoding_aes_key.to_string()
-    };
-    
-    let key = general_purpose::STANDARD
-        .decode(&key_str)
+    // Decode base64 key - WeWork uses non-standard base64 with invalid trailing bits
+    let key = decode_base64_lenient(encoding_aes_key)
         .map_err(|e| format!("Base64 decode key failed: {}", e))?;
     
     // Decode encrypted content
@@ -461,9 +460,9 @@ fn decrypt_message(encoding_aes_key: &str, encrypted: &str) -> Result<String, St
         return Err("Encrypted content too short".to_string());
     }
     
-    // AES-256-CBC decrypt
-    let iv = &encrypted_bytes[..16];
-    let ciphertext = &encrypted_bytes[16..];
+    // AES-256-CBC decrypt - WeWork uses key's first 16 bytes as IV
+    let iv = &key[..16];
+    let ciphertext = &encrypted_bytes[..];
     
     let cipher = Aes256CbcDec::new_from_slices(&key, iv)
         .map_err(|e| format!("Create cipher failed: {}", e))?;
