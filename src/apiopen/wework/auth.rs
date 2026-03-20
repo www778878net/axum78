@@ -142,6 +142,65 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
     }
 }
 
+/// Handle raw HTTP request (no middleware)
+pub async fn handle_raw(apifun: &str, body: Bytes) -> (StatusCode, [(axum::http::header::HeaderName, &'static str); 1], Bytes) {
+    // Parse body as JSON to get UpInfo
+    let up: UpInfo = if body.is_empty() {
+        UpInfo::new()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(min) => {
+                let min: MinimalRequest = min;
+                min.into()
+            }
+            Err(_) => UpInfo::new()
+        }
+    };
+    
+    let (status, bytes) = handle(apifun, up).await;
+    (status, [(axum::http::header::CONTENT_TYPE, "application/json")], bytes)
+}
+
+/// Minimal request for parsing
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct MinimalRequest {
+    #[serde(default)]
+    sid: String,
+    #[serde(default)]
+    cid: String,
+    #[serde(default)]
+    uid: String,
+    #[serde(default)]
+    uname: String,
+    #[serde(default)]
+    jsdata: Option<String>,
+}
+
+impl Default for MinimalRequest {
+    fn default() -> Self {
+        Self {
+            sid: String::new(),
+            cid: String::new(),
+            uid: String::new(),
+            uname: "guest".to_string(),
+            jsdata: None,
+        }
+    }
+}
+
+impl From<MinimalRequest> for UpInfo {
+    fn from(min: MinimalRequest) -> Self {
+        let mut up = UpInfo::new();
+        up.sid = min.sid;
+        up.cid = min.cid;
+        up.uid = min.uid;
+        up.uname = min.uname;
+        up.jsdata = min.jsdata;
+        up
+    }
+}
+
 /// Get WeWork OAuth login URL
 async fn login(up: &UpInfo) -> (StatusCode, Bytes) {
     let config = get_wework_config();

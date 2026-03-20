@@ -216,9 +216,19 @@ pub async fn sid_auth_middleware(
     let up: UpInfo = match serde_json::from_slice::<MinimalRequest>(&body_bytes) {
         Ok(min) => min.into(),
         Err(e) => {
-            logger.error(&format!("解析请求失败: {}", e));
-            let resp = BaseResponse::fail(&format!("解析请求失败: {}", e), -1);
-            return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default())).into_response();
+            // For wework/callback routes, allow empty body (GET request or XML body)
+            let is_wework_callback = apisys_lower == "apimes" 
+                && apimicro_lower == "wework" 
+                && apiobj_lower == "callback";
+            
+            if is_wework_callback || body_bytes.is_empty() {
+                logger.detail(&format!("跳过JSON解析: {}/{}/{}", apisys_lower, apimicro_lower, apiobj_lower));
+                UpInfo::new()
+            } else {
+                logger.error(&format!("解析请求失败: {}", e));
+                let resp = BaseResponse::fail(&format!("解析请求失败: {}", e), -1);
+                return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default())).into_response();
+            }
         }
     };
 

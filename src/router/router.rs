@@ -9,12 +9,12 @@
 //! - apimicro 不能以 "dll" 开头
 
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     Router,
-    routing::{any, post},
-    extract::{Path, State, Json as AxumJson},
+    routing::any,
+    extract::{Path, State, Json as AxumJson, Query, Request},
     response::IntoResponse,
-    http::{header, StatusCode},
+    http::{header, StatusCode, Uri, Method},
     middleware,
     Extension,
 };
@@ -162,19 +162,7 @@ async fn api_handler(
     )
 }
 
-/// 创建主路由器 (带认证中间件)
-pub fn create_router() -> Router<()> {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
-    
-    Router::new()
-        .route("/:apisys/:apimicro/:apiobj/:apifun", any(root_api_handler))
-        .layer(middleware::from_fn(sid_auth_middleware))
-        .layer(cors)
-}
-
+/// Root API handler for 4-level routes with middleware
 async fn root_api_handler(
     Extension((apisys, apimicro, apiobj, apifun)): Extension<(String, String, String, String)>,
     Extension(verify_result): Extension<VerifyResult>,
@@ -194,8 +182,8 @@ async fn root_api_handler(
         ("apigame", "mock", "game_state") => {
             crate::apigame::mock::game_state::handle(&apifun_lower, up).await
         }
-        ("apimes", "wework", "auth") => {
-            crate::apimes::wework::auth::handle(&apifun_lower, up).await
+        ("apiopen", "wework", "auth") => {
+            crate::apiopen::wework::auth::handle(&apifun_lower, up).await
         }
         _ => {
             let resp = Response::fail(&format!("API not found: {}/{}/{}/{}", apisys, apimicro, apiobj, apifun), 404);
@@ -204,6 +192,69 @@ async fn root_api_handler(
     };
 
     (status, [(header::CONTENT_TYPE, "application/json")], resp_bytes)
+}
+
+/// 创建主路由器 (带认证中间件)
+pub fn create_router() -> Router<()> {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+    
+    // apiopen routes - 不走中间件
+    let apiopen_router = Router::new()
+        .route("/:apimicro/:apiobj/:apifun", any(apiopen_handler));
+    
+    // api routes - 走中间件
+    let api_router = Router::new()
+        .route("/:apisys/:apimicro/:apiobj/:apifun", any(root_api_handler))
+        .layer(middleware::from_fn(sid_auth_middleware));
+    
+    Router::new()
+        .nest("/apiopen", apiopen_router)
+        .merge(api_router)
+        .layer(cors)
+}
+
+/// apiopen 处理器 - 不走中间件，直接处理
+async fn apiopen_handler(
+    Path((apimicro, apiobj, apifun)): Path<(String, String, String)>,
+    uri: Uri,
+    method: Method,
+    request: Request,
+) -> impl IntoResponse {
+    let apimicro_lower = apimicro.to_lowercase();
+    let apifun_lower = apifun.to_lowercase();
+    
+    tracing::info!("apiopen: {}/{}/{} {}", apimicro, apiobj, apifun, method);
+    
+    // Collect query params
+    let query: std::collections::HashMap<String, String> = uri
+        .query()
+        .map(|q| {
+            url::form_urlencoded::parse(q.as_bytes())
+                .into_owned()
+                .collect()
+        })
+        .unwrap_or_default();
+    
+    // Collect body
+    let body_bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    
+    match (apimicro_lower.as_str(), apiobj.as_str()) {
+        ("wework", "callback") => {
+            crate::apiopen::wework::callback::handle_raw(&apifun_lower, &method, &query, body_bytes).await
+        }
+        ("wework", "auth") => {
+            crate::apiopen::wework::auth::handle_raw(&apifun_lower, body_bytes).await
+        }
+        _ => {
+            let resp = Response::fail(&format!("API not found: apiopen/{}/{}/{}", apimicro, apiobj, apifun), 404);
+            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "application/json")], Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+        }
+    }
 }
 
 /// 保留旧的 ApiRouter 别名 (向后兼容)
