@@ -293,14 +293,12 @@ fn parse_message(xml: &str) -> Result<WeWorkMessage, String> {
 async fn handle_message(msg: &WeWorkMessage) -> Option<String> {
     match msg.msg_type.as_str() {
         "text" => {
-            // Text message - can auto reply
+            // Text message - echo back
             let content = msg.content.as_deref().unwrap_or("");
             tracing::info!("Text message from {}: {}", msg.from_user, content);
             
-            // TODO: Integrate with your chat/AI service
-            // Example auto reply:
-            // Some(build_text_reply(&msg.from_user, &msg.to_user, "收到消息"))
-            None
+            // Echo back the message
+            Some(build_text_reply(&msg.from_user, &msg.to_user, &format!("收到: {}", content)))
         }
         "event" => {
             // Event message
