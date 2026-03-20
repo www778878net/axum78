@@ -18,6 +18,7 @@ use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use base64::{Engine as _, engine::general_purpose};
 
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 
 /// Custom base64 decode that ignores invalid trailing bits (for WeWork 43-char key)
 /// WeWork's encoding_aes_key has invalid bits in the last character that Rust base64 0.22 rejects
@@ -192,8 +193,21 @@ async fn receive_message(params: &std::collections::HashMap<String, String>, bod
     let reply = handle_message(&msg).await;
     
     // Return reply or success
-    if let Some(reply_xml) = reply {
-        (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/xml")], Bytes::from(reply_xml))
+    if let Some(reply_content) = reply {
+        // Encrypt the reply
+        if !config.encoding_aes_key.is_empty() {
+            match build_encrypted_reply(&config.token, &config.encoding_aes_key, &config.corp_id, &msg.from_user, &msg.to_user, &reply_content) {
+                Ok(encrypted_xml) => {
+                    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/xml")], Bytes::from(encrypted_xml))
+                },
+                Err(e) => {
+                    tracing::error!("Failed to encrypt reply: {}", e);
+                    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain")], Bytes::from("success".to_string()))
+                }
+            }
+        } else {
+            (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/xml")], Bytes::from(reply_content))
+        }
     } else {
         (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain")], Bytes::from("success".to_string()))
     }
@@ -297,8 +311,8 @@ async fn handle_message(msg: &WeWorkMessage) -> Option<String> {
             let content = msg.content.as_deref().unwrap_or("");
             tracing::info!("Text message from {}: {}", msg.from_user, content);
             
-            // Echo back the message
-            Some(build_text_reply(&msg.from_user, &msg.to_user, &format!("收到: {}", content)))
+            // Echo back the message content
+            Some(format!("收到: {}", content))
         }
         "event" => {
             // Event message
@@ -346,6 +360,83 @@ pub fn build_text_reply(to_user: &str, from_user: &str, content: &str) -> String
         chrono::Utc::now().timestamp(),
         content
     )
+}
+
+/// Encrypt message for WeWork reply
+fn encrypt_message(encoding_aes_key: &str, corp_id: &str, msg: &str) -> Result<String, String> {
+    use aes::cipher::{KeyIvInit, BlockEncrypt};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use rand::Rng;
+    
+    // Decode key
+    let key = decode_base64_lenient(encoding_aes_key)
+        .map_err(|e| format!("Base64 decode key failed: {}", e))?;
+    
+    // Build plaintext: random(16) + msg_len(4) + msg + corp_id
+    let mut rng = rand::thread_rng();
+    let random_bytes: Vec<u8> = (0..16).map(|_| rng.gen::<u8>()).collect();
+    let msg_bytes = msg.as_bytes();
+    let msg_len = msg_bytes.len() as u32;
+    let corp_id_bytes = corp_id.as_bytes();
+    
+    let mut plaintext = Vec::new();
+    plaintext.extend_from_slice(&random_bytes);
+    plaintext.extend_from_slice(&msg_len.to_be_bytes());
+    plaintext.extend_from_slice(msg_bytes);
+    plaintext.extend_from_slice(corp_id_bytes);
+    
+    // PKCS7 padding
+    let block_size = 32; // AES block size
+    let pad_len = block_size - (plaintext.len() % block_size);
+    plaintext.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+    
+    // AES-256-CBC encrypt with key's first 16 bytes as IV
+    let iv = &key[..16];
+    let cipher = Aes256CbcEnc::new_from_slices(&key, iv)
+        .map_err(|e| format!("Create cipher failed: {}", e))?;
+    
+    let ciphertext = cipher.encrypt_padded_vec_mut::<Pkcs7>(&plaintext);
+    
+    Ok(STANDARD.encode(&ciphertext))
+}
+
+/// Build encrypted reply XML
+fn build_encrypted_reply(token: &str, encoding_aes_key: &str, corp_id: &str, to_user: &str, from_user: &str, content: &str) -> Result<String, String> {
+    let timestamp = chrono::Utc::now().timestamp();
+    let nonce: u32 = rand::thread_rng().gen();
+    
+    // Build inner message
+    let inner_msg = format!(
+        r#"<xml>
+<ToUserName><![CDATA[{}]]></ToUserName>
+<FromUserName><![CDATA[{}]]></FromUserName>
+<CreateTime>{}</CreateTime>
+<MsgType><![CDATA[text]]></MsgType>
+<Content><![CDATA[{}]]></Content>
+</xml>"#,
+        to_user, from_user, timestamp, content
+    );
+    
+    // Encrypt message
+    let encrypted = encrypt_message(encoding_aes_key, corp_id, &inner_msg)?;
+    
+    // Generate signature
+    let mut arr = vec![token, &timestamp.to_string(), &nonce.to_string(), &encrypted];
+    arr.sort();
+    let combined = arr.join("");
+    let mut hasher = Sha1::new();
+    hasher.update(combined.as_bytes());
+    let msg_signature = format!("{:x}", hasher.finalize());
+    
+    Ok(format!(
+        r#"<xml>
+<Encrypt><![CDATA[{}]]></Encrypt>
+<MsgSignature><![CDATA[{}]]></MsgSignature>
+<TimeStamp>{}</TimeStamp>
+<Nonce><![CDATA[{}]]></Nonce>
+</xml>"#,
+        encrypted, msg_signature, timestamp, nonce
+    ))
 }
 
 /// Verify signature
