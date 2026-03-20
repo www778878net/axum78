@@ -40,11 +40,15 @@ pub trait Controller78: Send + Sync + 'static {
 /// 路由状态 (内部共享)
 struct RouterState {
     controllers: HashMap<String, Arc<dyn Controller78>>,
+    open_controllers: HashMap<String, Arc<dyn Controller78>>,
 }
 
 /// 4级路由构建器
 pub struct ApiRouter78 {
+    /// 需要认证的路由
     controllers: HashMap<String, Arc<dyn Controller78>>,
+    /// 公开路由 (无中间件)
+    open_controllers: HashMap<String, Arc<dyn Controller78>>,
 }
 
 impl ApiRouter78 {
@@ -52,10 +56,11 @@ impl ApiRouter78 {
     pub fn new() -> Self {
         Self {
             controllers: HashMap::new(),
+            open_controllers: HashMap::new(),
         }
     }
 
-    /// 注册控制器
+    /// 注册控制器 (需要认证)
     ///
     /// - path: api 路径，格式 "apisys/apimicro/apiobj"
     /// - controller: 控制器实现
@@ -64,10 +69,21 @@ impl ApiRouter78 {
         self
     }
 
+    /// 注册公开控制器 (无认证中间件)
+    ///
+    /// - path: api 路径，格式 "apimicro/apiobj" (不需要 apisys 前缀)
+    /// - controller: 控制器实现
+    /// - 路由会挂载到 /apiopen/:apimicro/:apiobj/:apifun
+    pub fn register_open<C: Controller78>(mut self, path: &str, controller: C) -> Self {
+        self.open_controllers.insert(path.to_string(), Arc::new(controller));
+        self
+    }
+
     /// 构建最终路由（带CORS和认证中间件）
     pub fn build(self) -> Router {
         let state = Arc::new(RouterState {
             controllers: self.controllers,
+            open_controllers: self.open_controllers,
         });
 
         let cors = CorsLayer::new()
@@ -75,11 +91,21 @@ impl ApiRouter78 {
             .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
-        Router::new()
+        // 公开路由 - 无中间件
+        let open_router = Router::new()
+            .route("/:apimicro/:apiobj/:apifun", any(open_api_handler))
+            .with_state(state.clone());
+
+        // 认证路由 - 有中间件
+        let auth_router = Router::new()
             .route("/:apisys/:apimicro/:apiobj/:apifun", any(api_handler))
             .layer(middleware::from_fn(sid_auth_middleware))
+            .with_state(state);
+
+        Router::new()
+            .nest("/apiopen", open_router)
+            .merge(auth_router)
             .layer(cors)
-            .with_state(state)
     }
 }
 
@@ -87,6 +113,91 @@ impl Default for ApiRouter78 {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 公开路由 API 处理器 (无认证中间件)
+async fn open_api_handler(
+    State(state): State<Arc<RouterState>>,
+    Path((apimicro, apiobj, apifun)): Path<(String, String, String)>,
+    uri: Uri,
+    method: Method,
+    request: Request,
+) -> impl IntoResponse {
+    let apimicro_lower = apimicro.to_lowercase();
+    let apifun_lower = apifun.to_lowercase();
+
+    // 安全校验: apifun 不能以 "_" 开头 (私有方法)
+    if apifun.starts_with('_') {
+        return (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from(serde_json::to_string(&ApiResponse::fail("Access denied: private method", -4)).unwrap_or_default()),
+        );
+    }
+
+    // apimicro 不能以 "dll" 开头
+    if apimicro_lower.starts_with("dll") {
+        return (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from(serde_json::to_string(&ApiResponse::fail("Access denied: dll not allowed", -4)).unwrap_or_default()),
+        );
+    }
+
+    // 查找控制器
+    let controller_path = format!("{}/{}", apimicro, apiobj);
+    let controller = match state.open_controllers.get(&controller_path) {
+        Some(c) => c.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "application/json")],
+                Bytes::from(serde_json::to_string(&ApiResponse::fail(&format!("Controller not found: {}", controller_path), -1)).unwrap_or_default()),
+            );
+        }
+    };
+
+    // 创建 UpInfo (无认证信息)
+    let mut up = UpInfo::default();
+    up.apisys = "apiopen".to_string();
+    up.apimicro = apimicro.clone();
+    up.apiobj = apiobj.clone();
+    up.apifun = apifun.clone();
+
+    // 解析请求体 -> jsdata
+    let body_bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    
+    if !body_bytes.is_empty() {
+        if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
+            up.jsdata = Some(body_str.to_string());
+        }
+    }
+
+    // query 参数暂存到 source 字段 (简化处理)
+    if let Some(query_str) = uri.query() {
+        up.source = query_str.to_string();
+    }
+
+    // 调用方法
+    let result = controller.call(&mut up, &apifun_lower).await;
+
+    // 构建响应
+    if up.res != 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from(serde_json::to_string(&ApiResponse::fail(&up.errmsg, up.res)).unwrap_or_default()),
+        );
+    }
+
+    let resp = ApiResponse::success(result);
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        Bytes::from(serde_json::to_string(&resp).unwrap_or_default()),
+    )
 }
 
 /// 4级路由 API 处理器
