@@ -73,7 +73,7 @@ pub async fn handle_raw(
     body: Bytes,
 ) -> (StatusCode, [(axum::http::header::HeaderName, &'static str); 1], Bytes) {
     match apifun.to_lowercase().as_str() {
-        "index" | "verify" => {
+        "index" | "verify" | "send" => {
             if method == Method::GET {
                 // URL verification
                 verify_url(query).await
@@ -553,20 +553,43 @@ fn decrypt_message(encoding_aes_key: &str, encrypted: &str) -> Result<String, St
         .decode(encrypted)
         .map_err(|e| format!("Base64 decode content failed: {}", e))?;
     
+    tracing::info!("Decrypt: encrypted len={}, is_16_multiple={}", encrypted_bytes.len(), encrypted_bytes.len() % 16 == 0);
+    
     if encrypted_bytes.len() < 32 {
         return Err("Encrypted content too short".to_string());
     }
     
     // AES-256-CBC decrypt - WeWork uses key's first 16 bytes as IV
     let iv = &key[..16];
-    let ciphertext = &encrypted_bytes[..];
     
     let cipher = Aes256CbcDec::new_from_slices(&key, iv)
         .map_err(|e| format!("Create cipher failed: {}", e))?;
     
-    let mut buf = ciphertext.to_vec();
-    let decrypted = cipher.decrypt_padded_mut::<Pkcs7>(&mut buf)
-        .map_err(|e| format!("Decrypt failed: {}", e))?;
+    let mut buf = encrypted_bytes.to_vec();
+    
+    // Try PKCS7 first
+    let decrypted_result = cipher.decrypt_padded_mut::<Pkcs7>(&mut buf);
+    
+    let decrypted: Vec<u8> = match decrypted_result {
+        Ok(d) => d.to_vec(),
+        Err(e) => {
+            // Manual decrypt without padding validation
+            tracing::info!("PKCS7 failed ({}), trying manual unpad", e);
+            let mut buf2 = encrypted_bytes.to_vec();
+            let cipher2 = Aes256CbcDec::new_from_slices(&key, iv)
+                .map_err(|e| format!("Create cipher failed: {}", e))?;
+            cipher2.decrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut buf2)
+                .map_err(|e| format!("Decrypt failed: {}", e))?;
+            
+            // Manual PKCS7 unpad - remove padding bytes
+            let pad_len = buf2[buf2.len() - 1] as usize;
+            if pad_len > 0 && pad_len <= 16 {
+                buf2[..buf2.len() - pad_len].to_vec()
+            } else {
+                buf2
+            }
+        }
+    };
     
     // Parse: random(16) + msg_len(4) + msg + corp_id
     if decrypted.len() < 20 {
