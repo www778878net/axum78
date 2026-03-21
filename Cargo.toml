@@ -24,6 +24,8 @@ async-trait = "0.1"
 datastate = { git = "https://github.com/www778878net/datastate.git" }
 base = { git = "https://github.com/www778878net/rustbase.git" }
 rusqlite = { version = "0.32", features = ["bundled"] }
+mysql = "25"
+md5 = "0.7"
 
 # 日志
 tracing = "0.1"

@@ -290,6 +290,9 @@ async fn root_api_handler(
         ("apisvc", "backsvc", "synclog") => {
             crate::apisvc::backsvc::synclog::handle(&apifun_lower, up).await
         }
+        ("apisvc", "backsvc", "synclog_mysql") => {
+            crate::apisvc::backsvc::synclog_mysql::handle(&apifun_lower, up).await
+        }
         ("apigame", "mock", "game_state") => {
             crate::apigame::mock::game_state::handle(&apifun_lower, up).await
         }
