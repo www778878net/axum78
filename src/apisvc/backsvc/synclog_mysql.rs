@@ -146,27 +146,6 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
     }
 }
 
-/// 从 SID 提取 cid
-fn extract_cid_from_sid(sid: &str) -> String {
-    if sid.is_empty() {
-        return String::new();
-    }
-    if sid.contains('|') {
-        sid.split('|').next().unwrap_or("").to_string()
-    } else {
-        sid.to_string()
-    }
-}
-
-/// 从 SID 提取 worker
-fn extract_worker_from_sid(sid: &str) -> String {
-    if sid.contains('|') {
-        sid.split('|').nth(1).unwrap_or("").to_string()
-    } else {
-        String::new()
-    }
-}
-
 /// 批量添加 synclog 并执行 SQL
 async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str) -> (StatusCode, Bytes) {
     // 解码请求数据
@@ -421,7 +400,6 @@ fn insert_synclog(
 
 /// 获取待同步记录
 async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, Bytes) {
-    let expected_worker = extract_worker_from_sid(&up.sid);
     let limit = up.getnumber as i32;
 
     // 确保表存在
@@ -430,11 +408,10 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
-    // 查询 synced=1（已同步到服务器）且不是当前 worker 的记录
-    let sql = "SELECT * FROM synclog WHERE synced = 1 AND cid = ? AND worker != ? ORDER BY idpk ASC LIMIT ?";
+    // 查询 synced=1（已同步到服务器）的记录
+    let sql = "SELECT * FROM synclog WHERE synced = 1 AND cid = ? ORDER BY idpk ASC LIMIT ?";
     let params: Vec<Value> = vec![
         Value::String(expected_cid.to_string()),
-        Value::String(expected_worker.clone()),
         Value::Number(limit.into()),
     ];
 
