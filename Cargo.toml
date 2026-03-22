@@ -21,7 +21,7 @@ prost = "0.13"
 async-trait = "0.1"
 
 # 数据库
-datastate = { git = "https://github.com/www778878net/datastate.git" }
+datastate = { path = "../database" }
 base = { git = "https://github.com/www778878net/rustbase.git" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 mysql = "25"
@@ -42,6 +42,7 @@ urlencoding = "2.1"
 url = "2.5"
 sha1 = "0.10"
 rand = "0.8"
+regex = "1"
 
 # HTTP 客户端 (用于同步)
 reqwest = { version = "0.12", features = ["json", "blocking"] }

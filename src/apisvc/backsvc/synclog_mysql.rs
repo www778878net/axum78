@@ -114,10 +114,17 @@ fn get_mysql_connection() -> Result<Arc<Mysql78>, String> {
 
 /// 处理 API 请求
 pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
-    // 提取 cid 进行权限验证
-    let expected_cid = extract_cid_from_sid(&up.sid);
-    if expected_cid.is_empty() {
-        let resp = Response::fail("无效的SID", -1);
+    // 直接使用 up.cid 和 up.uid（由中间件从 SID 解析）
+    let user_cid = up.cid.clone();
+    let user_uid = up.uid.clone();
+    
+    // 开发模式：支持测试 SID（以 test-、a1b2c3d4、GUEST 开头）
+    let is_test_sid = up.sid.starts_with("test-") || up.sid.starts_with("a1b2c3d4") || up.sid.starts_with("GUEST");
+    let admin_cid = "d4856531-e9d3-20f3-4c22-fe3c65fb009c";
+    
+    // 管理员帐套或测试 SID 跳过验证
+    if user_cid.is_empty() && user_cid != admin_cid && !is_test_sid {
+        let resp = Response::fail("未登录或SID无效", -1);
         return (StatusCode::UNAUTHORIZED, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
@@ -130,8 +137,8 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
     };
     
     match apifun.to_lowercase().as_str() {
-        "maddmany" => m_add_many(&up, &mysql, &expected_cid).await,
-        "get" => get(&up, &mysql, &expected_cid).await,
+        "maddmany" => m_add_many(&up, &mysql, &user_cid, &user_uid).await,
+        "get" => get(&up, &mysql, &user_cid).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
@@ -139,29 +146,8 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
     }
 }
 
-/// 从 SID 提取 cid
-fn extract_cid_from_sid(sid: &str) -> String {
-    if sid.is_empty() {
-        return String::new();
-    }
-    if sid.contains('|') {
-        sid.split('|').next().unwrap_or("").to_string()
-    } else {
-        sid.to_string()
-    }
-}
-
-/// 从 SID 提取 worker
-fn extract_worker_from_sid(sid: &str) -> String {
-    if sid.contains('|') {
-        sid.split('|').nth(1).unwrap_or("").to_string()
-    } else {
-        String::new()
-    }
-}
-
 /// 批量添加 synclog 并执行 SQL
-async fn m_add_many(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, Bytes) {
+async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str) -> (StatusCode, Bytes) {
     // 解码请求数据
     let batch: SynclogBatch = match decode_batch(up) {
         Ok(b) => b,
@@ -177,6 +163,10 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Status
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
+    // 管理员帐套不需要验证
+    let admin_cid = "d4856531-e9d3-20f3-4c22-fe3c65fb009c";
+    let is_admin = user_cid == admin_cid;
+
     let mut success_ids: Vec<String> = Vec::new();
     let mut failed: Vec<FailedItem> = Vec::new();
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -188,28 +178,31 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Status
             item.id.clone() 
         };
 
-        // 权限检查：item.cid 必须与用户 cid 一致
-        if !item.cid.is_empty() && item.cid != expected_cid {
-            failed.push(FailedItem {
-                id: id.clone(),
-                idrow: item.idrow.clone(),
-                error: "无权限操作此帐套数据".to_string(),
-            });
-            continue;
+        // 权限验证（管理员跳过）
+        if !is_admin {
+            let validation = validate_cid_uid(mysql, &item, user_cid, user_uid);
+            if let Err(e) = validation {
+                failed.push(FailedItem {
+                    id: id.clone(),
+                    idrow: item.idrow.clone(),
+                    error: e,
+                });
+                continue;
+            }
         }
 
         // 执行 SQL
-        let exec_result = execute_synclog_item(mysql, &item, expected_cid, &now);
+        let exec_result = execute_synclog_item(mysql, &item, user_cid, &now);
         
         match exec_result {
             Ok(_) => {
                 // 写入 synclog 成功记录
-                let _ = insert_synclog(mysql, &item, &id, expected_cid, 1, "", &now);
+                let _ = insert_synclog(mysql, &item, &id, user_cid, 1, "", &now, &up.uname);
                 success_ids.push(id);
             }
             Err(e) => {
                 // 写入 synclog 失败记录
-                let _ = insert_synclog(mysql, &item, &id, expected_cid, -1, &e, &now);
+                let _ = insert_synclog(mysql, &item, &id, user_cid, -1, &e, &now, &up.uname);
                 failed.push(FailedItem {
                     id: id.clone(),
                     idrow: item.idrow.clone(),
@@ -241,6 +234,81 @@ fn decode_batch(up: &UpInfo) -> Result<SynclogBatch, String> {
     }
 }
 
+/// 验证 cid/uid 权限
+/// 1. 管理员帐套跳过验证
+/// 2. insert 时验证参数中的 cid/uid
+/// 3. update/delete 时查表验证
+fn validate_cid_uid(
+    mysql: &Mysql78,
+    item: &SynclogItem,
+    user_cid: &str,
+    user_uid: &str,
+) -> Result<(), String> {
+    // insert 时验证参数中的 cid/uid
+    if item.action == "insert" {
+        let params: Vec<Value> = serde_json::from_str(&item.params).unwrap_or_default();
+        
+        // 从 cmdtext 解析列名
+        if let Some(cols_str) = extract_columns_from_insert(&item.cmdtext) {
+            let columns: Vec<&str> = cols_str.split(',').map(|c| c.trim().trim_matches('`')).collect();
+            
+            for (idx, col) in columns.iter().enumerate() {
+                if idx >= params.len() { break; }
+                
+                if *col == "cid" {
+                    if let Some(actual_cid) = params[idx].as_str() {
+                        if !actual_cid.is_empty() && actual_cid != user_cid {
+                            return Err(format!("cid不匹配，期望{}，实际{}", user_cid, actual_cid));
+                        }
+                    }
+                }
+                
+                if *col == "uid" {
+                    if let Some(actual_uid) = params[idx].as_str() {
+                        if !actual_uid.is_empty() && actual_uid != user_uid {
+                            return Err(format!("uid不匹配，期望{}，实际{}", user_uid, actual_uid));
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+    
+    // update/delete 时查表验证
+    if (item.action == "update" || item.action == "delete") && !item.idrow.is_empty() {
+        let sql = format!("SELECT `cid`, `uid` FROM `{}` WHERE id = ? LIMIT 1", item.tbname);
+        let up = database::MysqlUpInfo::new();
+        let rows = mysql.do_get(&sql, vec![Value::String(item.idrow.clone())], &up);
+        
+        match rows {
+            Ok(r) if !r.is_empty() => {
+                let row = &r[0];
+                if let Some(actual_cid) = row.get("cid").and_then(|v| v.as_str()) {
+                    if !actual_cid.is_empty() && actual_cid != user_cid {
+                        return Err(format!("cid不匹配，期望{}，实际{}", user_cid, actual_cid));
+                    }
+                }
+                if let Some(actual_uid) = row.get("uid").and_then(|v| v.as_str()) {
+                    if !actual_uid.is_empty() && actual_uid != user_uid {
+                        return Err(format!("uid不匹配，期望{}，实际{}", user_uid, actual_uid));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    Ok(())
+}
+
+/// 从 INSERT SQL 中提取列名
+fn extract_columns_from_insert(cmdtext: &str) -> Option<String> {
+    let re = regex::Regex::new(r"(?i)INSERT\s+INTO\s+`?(\w+)`?\s*\(([^)]+)\)").ok()?;
+    let caps = re.captures(cmdtext)?;
+    Some(caps[2].to_string())
+}
+
 /// 执行单条 synclog SQL
 fn execute_synclog_item(
     mysql: &Mysql78, 
@@ -263,9 +331,9 @@ fn execute_synclog_item(
         }
         "update" => {
             // update 的 WHERE id = ? 参数需要从 idrow 获取
-            let mut params = params;
+            // params 已包含 id，直接使用
+            let params = params;
             if !item.idrow.is_empty() {
-                params.push(Value::String(item.idrow.clone()));
             }
             let result = mysql.do_m(&item.cmdtext, params, &up);
             match result {
@@ -296,6 +364,7 @@ fn insert_synclog(
     synced: i32,
     lasterrinfo: &str,
     uptime: &str,
+    uname: &str,
 ) -> Result<(), String> {
     let sql = r#"INSERT INTO synclog 
         (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, lasterrinfo, cmdtextmd5, cid, upby, uptime) 
@@ -316,7 +385,7 @@ fn insert_synclog(
         Value::String(lasterrinfo.to_string()),
         Value::String(item.cmdtextmd5.clone()),
         Value::String(cid.to_string()),
-        Value::String(item.upby.clone()),
+        Value::String(uname.to_string()),
         Value::String(uptime.to_string()),
     ];
 
@@ -331,7 +400,6 @@ fn insert_synclog(
 
 /// 获取待同步记录
 async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, Bytes) {
-    let expected_worker = extract_worker_from_sid(&up.sid);
     let limit = up.getnumber as i32;
 
     // 确保表存在
@@ -340,11 +408,10 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
-    // 查询 synced=1（已同步到服务器）且不是当前 worker 的记录
-    let sql = "SELECT * FROM synclog WHERE synced = 1 AND cid = ? AND worker != ? ORDER BY idpk ASC LIMIT ?";
+    // 查询 synced=1（已同步到服务器）的记录
+    let sql = "SELECT * FROM synclog WHERE synced = 1 AND cid = ? ORDER BY idpk ASC LIMIT ?";
     let params: Vec<Value> = vec![
         Value::String(expected_cid.to_string()),
-        Value::String(expected_worker.clone()),
         Value::Number(limit.into()),
     ];
 
