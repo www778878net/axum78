@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// MySQL 连接池（全局单例）
-static MYSQL_POOL: once_cell::sync::Lazy<Arc<Mutex<Option<Mysql78>>>> = 
+static MYSQL_POOL: once_cell::sync::Lazy<Arc<Mutex<Option<Arc<Mysql78>>>>> = 
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
 /// synclog 项（与 SQLite 版本共用结构）
@@ -97,7 +97,7 @@ fn get_mysql_config() -> MysqlConfig {
 }
 
 /// 获取或初始化 MySQL 连接池
-fn get_mysql_connection() -> Result<Mysql78, String> {
+fn get_mysql_connection() -> Result<Arc<Mysql78>, String> {
     let pool = MYSQL_POOL.clone();
     let mut pool_guard = pool.lock().map_err(|e| format!("获取连接池锁失败: {}", e))?;
     
@@ -105,10 +105,10 @@ fn get_mysql_connection() -> Result<Mysql78, String> {
         let config = get_mysql_config();
         let mut mysql = Mysql78::new(config);
         mysql.initialize()?;
-        *pool_guard = Some(mysql);
+        *pool_guard = Some(Arc::new(mysql));
     }
     
-    // 返回一个克隆的连接（实际使用连接池内部的连接）
+    // 返回 Arc 克隆
     Ok(pool_guard.as_ref().unwrap().clone())
 }
 
