@@ -71,7 +71,7 @@ pub trait BaseApi: Send + Sync + 'static {
         }
 
         let sql = format!(
-            "SELECT * FROM {} {} ORDER BY idpk DESC LIMIT 100",
+            "SELECT * FROM {} {} ORDER BY id DESC LIMIT 100",
             config.tbname, where_clause
         );
 
