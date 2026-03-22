@@ -261,11 +261,21 @@ fn execute_synclog_item(
                 Err(e) => Err(e),
             }
         }
-        "update" | "delete" => {
-            // update/delete 的 WHERE id = ? 参数需要从 idrow 获取
+        "update" => {
+            // update 的 WHERE id = ? 参数需要从 idrow 获取
+            let mut params = params;
             if !item.idrow.is_empty() {
                 params.push(Value::String(item.idrow.clone()));
             }
+            let result = mysql.do_m(&item.cmdtext, params, &up);
+            match result {
+                Ok(r) if r.error.is_none() => Ok(()),
+                Ok(r) => Err(r.error.unwrap_or_else(|| "更新失败".to_string())),
+                Err(e) => Err(e),
+            }
+        }
+        "delete" => {
+            // delete 的 params 已经包含 id，直接执行
             let result = mysql.do_m(&item.cmdtext, params, &up);
             match result {
                 Ok(r) if r.error.is_none() => Ok(()),
