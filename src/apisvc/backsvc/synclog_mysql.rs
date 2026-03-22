@@ -248,7 +248,7 @@ fn execute_synclog_item(
     _cid: &str,
     _now: &str,
 ) -> Result<(), String> {
-    let params: Vec<Value> = serde_json::from_str(&item.params).unwrap_or_default();
+    let mut params: Vec<Value> = serde_json::from_str(&item.params).unwrap_or_default();
     let up = database::MysqlUpInfo::new();
 
     match item.action.as_str() {
@@ -262,6 +262,11 @@ fn execute_synclog_item(
             }
         }
         "update" => {
+            // update 的 WHERE id = ? 参数需要从 idrow 获取
+            let mut params = params;
+            if !item.idrow.is_empty() {
+                params.push(Value::String(item.idrow.clone()));
+            }
             let result = mysql.do_m(&item.cmdtext, params, &up);
             match result {
                 Ok(r) if r.error.is_none() => Ok(()),
@@ -270,6 +275,7 @@ fn execute_synclog_item(
             }
         }
         "delete" => {
+            // delete 的 params 已经包含 id，直接执行
             let result = mysql.do_m(&item.cmdtext, params, &up);
             match result {
                 Ok(r) if r.error.is_none() => Ok(()),
