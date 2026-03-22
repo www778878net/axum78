@@ -315,33 +315,94 @@ async fn handle_message(msg: &WeWorkMessage) -> Option<String> {
             Some(format!("收到: {}", content))
         }
         "event" => {
-            // Event message
+            // Event message - 先登录用户
+            let user_info = login_user(&msg.from_user).await;
+            
             match msg.event.as_deref() {
                 Some("subscribe") => {
                     tracing::info!("User {} subscribed", msg.from_user);
+                    match user_info {
+                        Ok(user) => Some(format!("欢迎关注！您的SID: {}", user.sid)),
+                        Err(e) => {
+                            tracing::error!("Login failed: {}", e);
+                            Some("欢迎关注！登录失败，请重试".to_string())
+                        }
+                    }
                 }
                 Some("unsubscribe") => {
                     tracing::info!("User {} unsubscribed", msg.from_user);
+                    None
                 }
                 Some("click") => {
                     tracing::info!("User {} clicked menu: {:?}", msg.from_user, msg.event_key);
+                    // 根据 EventKey 路由到不同业务
+                    handle_menu_click(&msg.from_user, msg.event_key.as_deref(), user_info).await
                 }
                 Some("enter_chat") => {
                     tracing::info!("User {} entered chat", msg.from_user);
+                    match user_info {
+                        Ok(user) => Some(format!("进入会话！SID: {}", user.sid)),
+                        Err(_) => Some("进入会话失败".to_string()),
+                    }
                 }
                 Some("change_external_contact") => {
                     tracing::info!("External contact change: {:?}", msg.change_type);
+                    None
                 }
                 _ => {
                     tracing::info!("Unknown event: {:?}", msg.event);
+                    None
                 }
             }
-            None
         }
         _ => {
             tracing::info!("Unknown message type: {}", msg.msg_type);
             None
         }
+    }
+}
+
+/// 登录用户（查找或创建）
+async fn login_user(wechat_userid: &str) -> Result<crate::UserInfo, String> {
+    use crate::LoversDataStateMysql;
+    
+    let state = LoversDataStateMysql::new()?;
+    let config = get_wework_config();
+    
+    // 内部应用使用 internal 类型
+    state.find_or_create_user(wechat_userid, "internal", &config.corp_id)
+}
+
+/// 处理菜单点击事件
+async fn handle_menu_click(
+    wechat_userid: &str,
+    event_key: Option<&str>,
+    user_info: Result<crate::UserInfo, String>,
+) -> Option<String> {
+    let user = match user_info {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!("User not logged in: {}", e);
+            return Some("请先关注公众号".to_string());
+        }
+    };
+    
+    match event_key {
+        Some("daily_quiz") | Some("每日一炼") => {
+            // TODO: 调用每日一炼 API
+            Some(format!("每日一炼功能开发中...\n您的积分: {}", user.money78))
+        }
+        Some("my_score") | Some("我的成绩") => {
+            Some(format!(
+                "您的信息:\n用户ID: {}\n积分: {}\n消费: {}",
+                user.id, user.money78, user.consume
+            ))
+        }
+        Some(key) => {
+            tracing::info!("Unknown menu key: {}", key);
+            Some(format!("未知菜单: {}", key))
+        }
+        None => None,
     }
 }
 
