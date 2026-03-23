@@ -448,9 +448,19 @@ async fn handle_menu_click(
         None => return None,
     };
     
+    // 解析 EventKey: 格式可能是 "#sendmsg#_0_0#7599827016206112" 或直接 "7599827016206112"
+    let menu_id = if event_key.starts_with('#') {
+        // 格式: #sendmsg#_0_0#菜单ID
+        event_key.split('#').last().unwrap_or(event_key)
+    } else {
+        event_key
+    };
+    
+    tracing::info!("菜单点击: event_key={}, menu_id={}", event_key, menu_id);
+    
     // 检查是否是每日一炼菜单
     let menu_config = get_daily_menu_config();
-    if let Some(menu_subject) = menu_config.get(event_key) {
+    if let Some(menu_subject) = menu_config.get(menu_id) {
         // 调用出题 API
         return handle_daily_quiz_generate(&user.sid, &menu_subject.grade, &menu_subject.subject, user.money78 as i32).await;
     }
