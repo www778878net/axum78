@@ -16,6 +16,7 @@ pub mod apitest;
 pub mod apisvc;
 pub mod apigame;
 pub mod apiopen;
+pub mod memcached;
 
 pub use base78::{Base78, CidBase78};
 pub use context::{UpInfo, RequestBody, Context, VerifyResult, get_lovers_state, LoversDataState, LoversDataStateMysql, UserInfo, LOVERS_CREATE_SQL, LOVERS_AUTH_CREATE_SQL, AuthConfig, get_auth_config, sid_auth_middleware};
@@ -40,3 +41,6 @@ pub use apiopen::wework::get_wework_config;
 
 // Re-export database types for convenience
 pub use database::{Mysql78, MysqlConfig, MysqlUpInfo, next_id_string};
+
+// Re-export memcached types
+pub use memcached::{MemcachedClient, QuizState, MEMCACHED_CLIENT, get_memcached_client};
