@@ -91,7 +91,7 @@ impl MemcachedClient {
     /// 创建新客户端
     pub fn new(config: MemcachedConfig) -> Result<Self, String> {
         let url = format!("tcp://{}:{}", config.host, config.port);
-        let client = Client::connect(&url)
+        let client = Client::connect(url.as_str())
             .map_err(|e| format!("连接 Memcached 失败: {}", e))?;
 
         Ok(Self { client, config })

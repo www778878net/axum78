@@ -236,25 +236,39 @@ pub struct MenuSubjectConfig {
 /// 获取每日一炼菜单配置
 fn get_daily_menu_config() -> std::collections::HashMap<String, MenuSubjectConfig> {
     use std::fs;
-    use ini::Ini;
     
     let mut config = std::collections::HashMap::new();
     
     // 尝试读取配置文件
     let config_path = "docs/config/development.ini";
     if let Ok(content) = fs::read_to_string(config_path) {
-        if let Ok(ini) = Ini::load_from_str(&content) {
-            if let Some(section) = ini.section(Some("DAILY_MENU")) {
-                for (key, value) in section.iter() {
-                    // 格式: menu_id = 年级:科目
-                    if let Some(value_str) = value {
-                        let parts: Vec<&str> = value_str.split(':').collect();
-                        if parts.len() == 2 {
-                            config.insert(key.to_string(), MenuSubjectConfig {
-                                grade: parts[0].trim().to_string(),
-                                subject: parts[1].trim().to_string(),
-                            });
-                        }
+        let mut in_section = false;
+        for line in content.lines() {
+            let line = line.trim();
+            
+            // 检测 section
+            if line == "[DAILY_MENU]" {
+                in_section = true;
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                in_section = false;
+                continue;
+            }
+            
+            // 解析 key = value
+            if in_section && line.contains('=') {
+                let parts: Vec<&str> = line.splitn(2, '=').collect();
+                if parts.len() == 2 {
+                    let key = parts[0].trim();
+                    let value = parts[1].trim();
+                    // 格式: 年级:科目
+                    let value_parts: Vec<&str> = value.split(':').collect();
+                    if value_parts.len() == 2 {
+                        config.insert(key.to_string(), MenuSubjectConfig {
+                            grade: value_parts[0].trim().to_string(),
+                            subject: value_parts[1].trim().to_string(),
+                        });
                     }
                 }
             }
@@ -438,7 +452,7 @@ async fn handle_menu_click(
     let menu_config = get_daily_menu_config();
     if let Some(menu_subject) = menu_config.get(event_key) {
         // 调用出题 API
-        return handle_daily_quiz_generate(&user.sid, &menu_subject.grade, &menu_subject.subject, user.money78).await;
+        return handle_daily_quiz_generate(&user.sid, &menu_subject.grade, &menu_subject.subject, user.money78 as i32).await;
     }
     
     // 其他菜单处理
@@ -466,7 +480,7 @@ async fn handle_daily_quiz_generate(uid: &str, grade: &str, subject: &str, curre
     tracing::info!("开始出题: uid={}, grade={}, subject={}", uid, grade, subject);
     
     // 调用出题 API
-    match aiaxum78::generate_question(grade, subject, Some(current_score)).await {
+    match crate::generate_question(grade, subject, Some(current_score)).await {
         Ok(result) => {
             // 存储到 Memcached
             let quiz_state = QuizState::new(
@@ -532,7 +546,7 @@ async fn handle_daily_quiz_judge(wechat_userid: &str, user_answer: &str) -> Opti
     let current_score = user.money78;
     
     // 调用判题 API
-    match aiaxum78::judge_answer(
+    match crate::judge_answer(
         uid,
         &quiz_state.grade,
         &quiz_state.subject,
@@ -540,7 +554,7 @@ async fn handle_daily_quiz_judge(wechat_userid: &str, user_answer: &str) -> Opti
         &quiz_state.standard_answer,
         &quiz_state.explanation,
         user_answer,
-        current_score,
+        current_score as i32,
         quiz_state.score_difficulty,
     ).await {
         Ok(result) => {
