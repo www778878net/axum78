@@ -15,7 +15,7 @@ use axum::{
     http::StatusCode,
 };
 use base::{UpInfo, Response};
-use database::{Mysql78, MysqlConfig};
+use database::{Mysql78, MysqlConfig, MysqlUpInfo};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use crate::VerifyResult;
