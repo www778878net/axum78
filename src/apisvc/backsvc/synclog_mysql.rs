@@ -23,7 +23,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// MySQL 连接池（全局单例）
+/// MySQL 连接池（全局单例，延迟初始化）
 static MYSQL_POOL: once_cell::sync::Lazy<Arc<Mutex<Option<Arc<Mysql78>>>>> = 
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
@@ -83,69 +83,73 @@ pub struct FailedItem {
 /// MySQL 配置（从配置文件或环境变量读取）
 /// 优先级：配置文件 > 环境变量 > 默认值
 fn get_mysql_config() -> MysqlConfig {
-    // 尝试从配置文件读取
-    let config_from_file = base::ProjectPath::find().ok().and_then(|p| {
-        // 读取 [mysql] 段配置（read_ini_value 返回 Option<String>）
-        let host = p.read_ini_value("mysql", "host")?;
-        let port = p.read_ini_value("mysql", "port")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3306);
-        let user = p.read_ini_value("mysql", "user")?;
-        let password = p.read_ini_value("mysql", "password").unwrap_or_default();
-        let database = p.read_ini_value("mysql", "database")?;
-        
-        Some(MysqlConfig {
+    // 优先使用 MYSQL_ 前缀的环境变量
+    if let Ok(host) = std::env::var("MYSQL_HOST") {
+        return MysqlConfig {
             host,
-            port,
-            user,
-            password,
-            database,
-            max_connections: p.read_ini_value("mysql", "max_connections")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10),
-            is_log: p.read_ini_value("mysql", "is_log")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(false),
-            is_count: p.read_ini_value("mysql", "is_count")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(false),
-        })
-    });
-
-    // 如果配置文件有配置，使用配置文件的值
-    if let Some(config) = config_from_file {
-        return config;
+            port: std::env::var("MYSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3306),
+            user: std::env::var("MYSQL_USER").unwrap_or_else(|_| "root".to_string()),
+            password: std::env::var("MYSQL_PASSWORD").unwrap_or_default(),
+            database: std::env::var("MYSQL_DATABASE").unwrap_or_else(|_| "testdb".to_string()),
+            max_connections: std::env::var("MYSQL_MAX_CONNECTIONS").ok().and_then(|p| p.parse().ok()).unwrap_or(10),
+            is_log: false,
+            is_count: false,
+        };
+    }
+    
+    // 从配置文件直接读取（使用 load_ini_config 避免环境变量污染）
+    if let Ok(p) = base::ProjectPath::find() {
+        if let Ok(ini) = p.load_ini_config() {
+            if let Some(mysql_section) = ini.get("mysql") {
+                let host = mysql_section.get("host").cloned().unwrap_or_default();
+                let port = mysql_section.get("port").and_then(|s| s.parse().ok()).unwrap_or(3306);
+                let user = mysql_section.get("user").cloned().unwrap_or_default();
+                let password = mysql_section.get("password").cloned().unwrap_or_default();
+                let database = mysql_section.get("database").cloned().unwrap_or_default();
+                
+                if !host.is_empty() && !user.is_empty() && !database.is_empty() {
+                    return MysqlConfig {
+                        host,
+                        port,
+                        user,
+                        password,
+                        database,
+                        max_connections: mysql_section.get("max_connections").and_then(|s| s.parse().ok()).unwrap_or(10),
+                        is_log: mysql_section.get("is_log").and_then(|s| s.parse().ok()).unwrap_or(false),
+                        is_count: mysql_section.get("is_count").and_then(|s| s.parse().ok()).unwrap_or(false),
+                    };
+                }
+            }
+        }
     }
 
-    // 否则从环境变量读取
+    // 默认配置
     MysqlConfig {
-        host: std::env::var("MYSQL_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
-        port: std::env::var("MYSQL_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(3306),
-        user: std::env::var("MYSQL_USER").unwrap_or_else(|_| "root".to_string()),
-        password: std::env::var("MYSQL_PASSWORD").unwrap_or_default(),
-        database: std::env::var("MYSQL_DATABASE").unwrap_or_else(|_| "testdb".to_string()),
+        host: "127.0.0.1".to_string(),
+        port: 3306,
+        user: "root".to_string(),
+        password: String::new(),
+        database: "testdb".to_string(),
         max_connections: 10,
         is_log: false,
         is_count: false,
     }
 }
 
-/// 获取或初始化 MySQL 连接池
+/// 获取 MySQL 连接（延迟初始化）
 fn get_mysql_connection() -> Result<Arc<Mysql78>, String> {
     let pool = MYSQL_POOL.clone();
     let mut pool_guard = pool.lock().map_err(|e| format!("获取连接池锁失败: {}", e))?;
     
     if pool_guard.is_none() {
         let config = get_mysql_config();
+        eprintln!("DEBUG get_mysql_connection - config: host={}, port={}, user={}, database={}", 
+            config.host, config.port, config.user, config.database);
         let mut mysql = Mysql78::new(config);
         mysql.initialize()?;
         *pool_guard = Some(Arc::new(mysql));
     }
     
-    // 返回 Arc 克隆
     Ok(pool_guard.as_ref().unwrap().clone())
 }
 
@@ -431,7 +435,7 @@ fn insert_synclog(
     }
 }
 
-/// 获取待同步记录
+/// 获取待同步记录（返回业务数据）
 async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, Bytes) {
     let limit = up.getnumber as i32;
 
@@ -448,8 +452,8 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
         Value::Number(limit.into()),
     ];
 
-    let up = database::MysqlUpInfo::new();
-    let rows = match mysql.do_get(sql, params, &up) {
+    let up_info = database::MysqlUpInfo::new();
+    let rows = match mysql.do_get(sql, params, &up_info) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询失败: {}", e), -1);
@@ -457,31 +461,74 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
         }
     };
 
-    let items: Vec<SynclogItem> = rows.iter().map(|row| SynclogItem {
-        id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        apisys: row.get("apisys").and_then(|v| v.as_str()).unwrap_or("v1").to_string(),
-        apimicro: row.get("apimicro").and_then(|v| v.as_str()).unwrap_or("iflow").to_string(),
-        apiobj: row.get("apiobj").and_then(|v| v.as_str()).unwrap_or("synclog").to_string(),
-        tbname: row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        action: row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        cmdtext: row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        params: row.get("params").and_then(|v| match v {
-            Value::String(s) => Some(s.as_str()),
-            _ => None,
-        }).unwrap_or("[]").to_string(),
-        idrow: row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        worker: row.get("worker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        synced: row.get("synced").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-        cmdtextmd5: row.get("cmdtextmd5").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        upby: row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-    }).collect();
+    // 构建 SynclogItem，对于业务数据需要查询实际表内容
+    let mut items: Vec<SynclogItem> = Vec::new();
+
+    for row in rows {
+        let tbname = row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        // 默认 cmdtext 和 params
+        let mut cmdtext = String::new();
+        let params = "[]".to_string(); // 下载时不需要参数
+
+        // 如果需要获取业务数据（insert/update），查询业务表
+        if action == "insert" || action == "update" {
+            if !tbname.is_empty() && !idrow.is_empty() {
+                // 查询业务表最新数据
+                let business_sql = &format!("SELECT * FROM `{}` WHERE id = ?", tbname);
+                let mut business_params = Vec::new();
+                business_params.push(Value::String(idrow.clone()));
+
+                if let Ok(business_rows) = mysql.do_get(business_sql, business_params, &up_info) {
+                    if let Some(business_row) = business_rows.first() {
+                        // 将业务行转换为 JSON 存入 cmdtext
+                        if let Ok(json_str) = serde_json::to_string(business_row) {
+                            cmdtext = json_str;
+                        } else {
+                            cmdtext = "{}".to_string();
+                        }
+                    } else {
+                        cmdtext = "{}".to_string();
+                    }
+                } else {
+                    cmdtext = "{}".to_string();
+                }
+            } else {
+                cmdtext = "{}".to_string();
+            }
+        } else if action == "delete" {
+            // delete 操作不返回业务数据（已删除）
+            cmdtext = "{}".to_string();
+        } else {
+            // 未知操作，保持原有 cmdtext（兼容旧数据）
+            cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        }
+
+        items.push(SynclogItem {
+            id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            apisys: row.get("apisys").and_then(|v| v.as_str()).unwrap_or("v1").to_string(),
+            apimicro: row.get("apimicro").and_then(|v| v.as_str()).unwrap_or("iflow").to_string(),
+            apiobj: row.get("apiobj").and_then(|v| v.as_str()).unwrap_or("synclog").to_string(),
+            tbname,
+            action,
+            cmdtext,
+            params,
+            idrow,
+            worker: row.get("worker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            synced: row.get("synced").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            cmdtextmd5: row.get("cmdtextmd5").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            upby: row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        });
+    }
 
     let batch = SynclogBatch { items };
     let bytedata = batch.encode_to_vec();
     use base64::{Engine as _, engine::general_purpose};
     let bytedata_base64 = general_purpose::STANDARD.encode(&bytedata);
-    
+
     let resp = Response::success_json(&serde_json::json!({ "bytedata": bytedata_base64 }));
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
@@ -501,7 +548,7 @@ fn ensure_synclog_table(mysql: &Mysql78) -> Result<(), String> {
         idrow VARCHAR(64) NOT NULL DEFAULT '',
         worker VARCHAR(100) NOT NULL DEFAULT '',
         synced INT NOT NULL DEFAULT 0,
-        lasterrinfo TEXT NOT NULL DEFAULT '',
+        lasterrinfo TEXT,
         cmdtextmd5 VARCHAR(64) NOT NULL DEFAULT '',
         cid VARCHAR(64) NOT NULL DEFAULT '',
         upby VARCHAR(100) NOT NULL DEFAULT '',
