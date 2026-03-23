@@ -47,6 +47,9 @@ regex = "1"
 # HTTP 客户端 (用于同步)
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 
+# Memcached 客户端
+memcache = "0.18"
+
 [dev-dependencies]
 serial_test = "3"
 

@@ -226,6 +226,59 @@ fn parse_query_params(query: &str) -> std::collections::HashMap<String, String> 
         .collect()
 }
 
+/// 菜单配置项
+#[derive(Debug, Clone)]
+pub struct MenuSubjectConfig {
+    pub grade: String,
+    pub subject: String,
+}
+
+/// 获取每日一炼菜单配置
+fn get_daily_menu_config() -> std::collections::HashMap<String, MenuSubjectConfig> {
+    use std::fs;
+    
+    let mut config = std::collections::HashMap::new();
+    
+    // 尝试读取配置文件
+    let config_path = "docs/config/development.ini";
+    if let Ok(content) = fs::read_to_string(config_path) {
+        let mut in_section = false;
+        for line in content.lines() {
+            let line = line.trim();
+            
+            // 检测 section
+            if line == "[DAILY_MENU]" {
+                in_section = true;
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                in_section = false;
+                continue;
+            }
+            
+            // 解析 key = value
+            if in_section && line.contains('=') {
+                let parts: Vec<&str> = line.splitn(2, '=').collect();
+                if parts.len() == 2 {
+                    let key = parts[0].trim();
+                    let value = parts[1].trim();
+                    // 格式: 年级:科目
+                    let value_parts: Vec<&str> = value.split(':').collect();
+                    if value_parts.len() == 2 {
+                        config.insert(key.to_string(), MenuSubjectConfig {
+                            grade: value_parts[0].trim().to_string(),
+                            subject: value_parts[1].trim().to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    
+    tracing::debug!("加载菜单配置: {} 项", config.len());
+    config
+}
+
 /// Simple URL decode
 fn urlencoding_decode(s: &str) -> String {
     s.replace("%20", " ")
@@ -307,12 +360,15 @@ fn parse_message(xml: &str) -> Result<WeWorkMessage, String> {
 async fn handle_message(msg: &WeWorkMessage) -> Option<String> {
     match msg.msg_type.as_str() {
         "text" => {
-            // Text message - echo back
+            // Text message - 检查是否有答题状态
             let content = msg.content.as_deref().unwrap_or("");
             tracing::info!("Text message from {}: {}", msg.from_user, content);
             
-            // Echo back the message content
-            Some(format!("收到: {}", content))
+            // 检查是否有答题状态
+            match handle_daily_quiz_judge(&msg.from_user, content).await {
+                Some(reply) => Some(reply),
+                None => Some(format!("收到: {}", content)),
+            }
         }
         "event" => {
             // Event message - 先登录用户
@@ -387,22 +443,156 @@ async fn handle_menu_click(
         }
     };
     
+    let event_key = match event_key {
+        Some(k) => k,
+        None => return None,
+    };
+    
+    // 解析 EventKey: 格式可能是 "#sendmsg#_0_0#7599827016206112" 或直接 "7599827016206112"
+    let menu_id = if event_key.starts_with('#') {
+        // 格式: #sendmsg#_0_0#菜单ID
+        event_key.split('#').last().unwrap_or(event_key)
+    } else {
+        event_key
+    };
+    
+    tracing::info!("菜单点击: event_key={}, menu_id={}", event_key, menu_id);
+    
+    // 检查是否是每日一炼菜单
+    let menu_config = get_daily_menu_config();
+    if let Some(menu_subject) = menu_config.get(menu_id) {
+        // 调用出题 API
+        return handle_daily_quiz_generate(&user.sid, &menu_subject.grade, &menu_subject.subject, user.money78 as i32).await;
+    }
+    
+    // 其他菜单处理
     match event_key {
-        Some("daily_quiz") | Some("每日一炼") => {
-            // TODO: 调用每日一炼 API
+        "daily_quiz" | "每日一炼" => {
             Some(format!("每日一炼功能开发中...\n您的积分: {}", user.money78))
         }
-        Some("my_score") | Some("我的成绩") => {
+        "my_score" | "我的成绩" => {
             Some(format!(
                 "您的信息:\n用户ID: {}\n积分: {}\n消费: {}",
                 user.id, user.money78, user.consume
             ))
         }
-        Some(key) => {
+        key => {
             tracing::info!("Unknown menu key: {}", key);
             Some(format!("未知菜单: {}", key))
         }
-        None => None,
+    }
+}
+
+/// 处理出题请求
+async fn handle_daily_quiz_generate(uid: &str, grade: &str, subject: &str, current_score: i32) -> Option<String> {
+    use crate::memcached::{get_memcached_client, QuizState};
+    
+    tracing::info!("开始出题: uid={}, grade={}, subject={}", uid, grade, subject);
+    
+    // 调用出题 API
+    match crate::generate_question(grade, subject, Some(current_score)).await {
+        Ok(result) => {
+            // 存储到 Memcached
+            let quiz_state = QuizState::new(
+                subject.to_string(), // idsubject 暂时用科目名
+                grade.to_string(),
+                subject.to_string(),
+                result.question_id.clone(),
+                result.question.clone(),
+                result.standard_answer.clone(),
+                result.explanation.clone(),
+                result.score_difficulty,
+            );
+            
+            if let Err(e) = get_memcached_client().set_quiz_state(uid, &quiz_state) {
+                tracing::error!("存储答题状态失败: {}", e);
+                return Some("出题成功，但存储失败，请重试".to_string());
+            }
+            
+            // 格式化返回消息
+            let hint_text = result.hint.map(|h| format!("\n提示：{}", h)).unwrap_or_default();
+            Some(format!(
+                "【{}{}题】\n{}{}\n\n请直接回复答案",
+                grade, subject, result.question, hint_text
+            ))
+        }
+        Err(e) => {
+            tracing::error!("出题失败: {}", e);
+            Some(format!("出题失败: {}", e))
+        }
+    }
+}
+
+/// 处理判题请求
+async fn handle_daily_quiz_judge(wechat_userid: &str, user_answer: &str) -> Option<String> {
+    use crate::memcached::get_memcached_client;
+    
+    // 先登录用户获取 uid
+    let user = login_user(wechat_userid).await.ok()?;
+    let uid = &user.sid;
+    
+    // 获取答题状态
+    let quiz_state = match get_memcached_client().get_quiz_state(uid) {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            tracing::info!("用户 {} 没有答题状态", uid);
+            return None; // 返回 None，让默认处理生效
+        }
+        Err(e) => {
+            tracing::error!("获取答题状态失败: {}", e);
+            return Some("系统错误，请重试".to_string());
+        }
+    };
+    
+    // 检查是否过期
+    if quiz_state.is_expired(300) {
+        let _ = get_memcached_client().delete_quiz_state(uid);
+        return Some("答题已超时，请重新选择科目".to_string());
+    }
+    
+    tracing::info!("开始判题: uid={}, answer={}", uid, user_answer);
+    
+    // 获取用户当前能力分
+    let current_score = user.money78;
+    
+    // 调用判题 API
+    match crate::judge_answer(
+        uid,
+        &quiz_state.grade,
+        &quiz_state.subject,
+        &quiz_state.question,
+        &quiz_state.standard_answer,
+        &quiz_state.explanation,
+        user_answer,
+        current_score as i32,
+        quiz_state.score_difficulty,
+    ).await {
+        Ok(result) => {
+            // 删除答题状态
+            let _ = get_memcached_client().delete_quiz_state(uid);
+            
+            // 格式化返回消息
+            let correct_text = if result.is_correct { "回答正确！" } else { "回答错误" };
+            let score_change_text = if result.score_change > 0 {
+                format!("+{}", result.score_change)
+            } else {
+                result.score_change.to_string()
+            };
+            
+            Some(format!(
+                "{} +{}积分\n能力分: {} ({}{})\n\n【解析】\n{}",
+                correct_text,
+                result.points_change,
+                result.new_score,
+                score_change_text,
+                result.feedback,
+                result.explanation
+            ))
+        }
+        Err(e) => {
+            tracing::error!("判题失败: {}", e);
+            Some(format!("判题失败: {}", e))
+        }
     }
 }
 
