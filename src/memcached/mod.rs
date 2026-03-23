@@ -4,4 +4,4 @@
 
 mod client;
 
-pub use client::{MemcachedClient, QuizState, MEMCACHED_CLIENT};
+pub use client::{MemcachedClient, QuizState, MEMCACHED_CLIENT, get_memcached_client};
