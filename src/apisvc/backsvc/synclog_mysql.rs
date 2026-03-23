@@ -18,6 +18,7 @@ use base::{UpInfo, Response};
 use database::{Mysql78, MysqlConfig};
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use crate::VerifyResult;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -84,15 +85,14 @@ pub struct FailedItem {
 fn get_mysql_config() -> MysqlConfig {
     // 尝试从配置文件读取
     let config_from_file = base::ProjectPath::find().ok().and_then(|p| {
-        // 读取 [mysql] 段配置
-        let host = p.read_ini_value("mysql", "host").ok()?;
+        // 读取 [mysql] 段配置（read_ini_value 返回 Option<String>）
+        let host = p.read_ini_value("mysql", "host")?;
         let port = p.read_ini_value("mysql", "port")
-            .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(3306);
-        let user = p.read_ini_value("mysql", "user").ok()?;
-        let password = p.read_ini_value("mysql", "password").ok().unwrap_or_default();
-        let database = p.read_ini_value("mysql", "database").ok()?;
+        let user = p.read_ini_value("mysql", "user")?;
+        let password = p.read_ini_value("mysql", "password").unwrap_or_default();
+        let database = p.read_ini_value("mysql", "database")?;
         
         Some(MysqlConfig {
             host,
@@ -101,15 +101,12 @@ fn get_mysql_config() -> MysqlConfig {
             password,
             database,
             max_connections: p.read_ini_value("mysql", "max_connections")
-                .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10),
             is_log: p.read_ini_value("mysql", "is_log")
-                .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(false),
             is_count: p.read_ini_value("mysql", "is_count")
-                .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(false),
         })
@@ -153,10 +150,10 @@ fn get_mysql_connection() -> Result<Arc<Mysql78>, String> {
 }
 
 /// 处理 API 请求
-pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
-    // 直接使用 up.cid 和 up.uid（由中间件从 SID 解析）
-    let user_cid = up.cid.clone();
-    let user_uid = up.uid.clone();
+pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (StatusCode, Bytes) {
+    // 从 VerifyResult 获取验证后的 cid/uid（由中间件从数据库验证 SID 后填充）
+    let user_cid = verify_result.cid.clone();
+    let user_uid = verify_result.uid.clone();
     
     // SAAS 权限验证：所有用户平等，user_cid 为空则拒绝访问
     if user_cid.is_empty() {
