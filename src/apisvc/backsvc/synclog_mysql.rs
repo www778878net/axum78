@@ -79,8 +79,48 @@ pub struct FailedItem {
     pub error: String,
 }
 
-/// MySQL 配置（从环境变量或配置文件读取）
+/// MySQL 配置（从配置文件或环境变量读取）
+/// 优先级：配置文件 > 环境变量 > 默认值
 fn get_mysql_config() -> MysqlConfig {
+    // 尝试从配置文件读取
+    let config_from_file = base::ProjectPath::find().ok().and_then(|p| {
+        // 读取 [mysql] 段配置
+        let host = p.read_ini_value("mysql", "host").ok()?;
+        let port = p.read_ini_value("mysql", "port")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3306);
+        let user = p.read_ini_value("mysql", "user").ok()?;
+        let password = p.read_ini_value("mysql", "password").ok().unwrap_or_default();
+        let database = p.read_ini_value("mysql", "database").ok()?;
+        
+        Some(MysqlConfig {
+            host,
+            port,
+            user,
+            password,
+            database,
+            max_connections: p.read_ini_value("mysql", "max_connections")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10),
+            is_log: p.read_ini_value("mysql", "is_log")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(false),
+            is_count: p.read_ini_value("mysql", "is_count")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(false),
+        })
+    });
+
+    // 如果配置文件有配置，使用配置文件的值
+    if let Some(config) = config_from_file {
+        return config;
+    }
+
+    // 否则从环境变量读取
     MysqlConfig {
         host: std::env::var("MYSQL_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
         port: std::env::var("MYSQL_PORT")
