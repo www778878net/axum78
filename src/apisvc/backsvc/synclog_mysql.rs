@@ -158,12 +158,8 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
     let user_cid = up.cid.clone();
     let user_uid = up.uid.clone();
     
-    // 开发模式：支持测试 SID（以 test-、a1b2c3d4、GUEST 开头）
-    let is_test_sid = up.sid.starts_with("test-") || up.sid.starts_with("a1b2c3d4") || up.sid.starts_with("GUEST");
-    let admin_cid = "d4856531-e9d3-20f3-4c22-fe3c65fb009c";
-    
-    // 管理员帐套或测试 SID 跳过验证
-    if user_cid.is_empty() && user_cid != admin_cid && !is_test_sid {
+    // SAAS 权限验证：所有用户平等，user_cid 为空则拒绝访问
+    if user_cid.is_empty() {
         let resp = Response::fail("未登录或SID无效", -1);
         return (StatusCode::UNAUTHORIZED, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
