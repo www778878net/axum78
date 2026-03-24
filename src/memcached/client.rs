@@ -2,11 +2,12 @@
 //!
 //! 用于存储用户答题状态
 
-use memcache::{Client, MemcacheError};
+use memcache::Client;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// 答题状态
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,8 +84,14 @@ impl Default for MemcachedConfig {
 
 /// Memcached 客户端
 pub struct MemcachedClient {
-    client: Client,
+    /// Memcached 客户端（可能不可用）
+    client: Option<Client>,
+    /// 内存缓存（降级时使用）
+    memory_cache: Mutex<HashMap<String, (QuizState, i64)>>,
+    /// 配置
     config: MemcachedConfig,
+    /// 是否可用
+    available: bool,
 }
 
 impl MemcachedClient {
@@ -92,10 +99,31 @@ impl MemcachedClient {
     pub fn new(config: MemcachedConfig) -> Result<Self, String> {
         // memcache 库使用 memcache:// 协议前缀
         let url = format!("memcache://{}:{}", config.host, config.port);
-        let client = Client::connect(url.as_str())
-            .map_err(|e| format!("连接 Memcached 失败: {}", e))?;
+        match Client::connect(url.as_str()) {
+            Ok(client) => {
+                tracing::info!("Memcached 连接成功: {}:{}", config.host, config.port);
+                Ok(Self {
+                    client: Some(client),
+                    memory_cache: Mutex::new(HashMap::new()),
+                    config,
+                    available: true,
+                })
+            }
+            Err(e) => {
+                Err(format!("连接 Memcached 失败: {}", e))
+            }
+        }
+    }
 
-        Ok(Self { client, config })
+    /// 创建不可用的客户端（降级模式）
+    pub fn unavailable() -> Self {
+        tracing::info!("使用内存缓存降级模式");
+        Self {
+            client: None,
+            memory_cache: Mutex::new(HashMap::new()),
+            config: MemcachedConfig::default(),
+            available: false,
+        }
     }
 
     /// 生成答题状态 key
@@ -103,17 +131,34 @@ impl MemcachedClient {
         format!("daily_quiz:{}", uid)
     }
 
+    /// 检查是否可用
+    pub fn is_available(&self) -> bool {
+        self.available
+    }
+
     /// 保存答题状态
     pub fn set_quiz_state(&self, uid: &str, state: &QuizState) -> Result<(), String> {
         let key = Self::quiz_key(uid);
-        let value = serde_json::to_string(state)
-            .map_err(|e| format!("序列化答题状态失败: {}", e))?;
 
-        self.client
-            .set(&key, value, self.config.quiz_expire)
-            .map_err(|e| format!("写入 Memcached 失败: {}", e))?;
+        if self.available {
+            if let Some(ref client) = self.client {
+                let value = serde_json::to_string(state)
+                    .map_err(|e| format!("序列化答题状态失败: {}", e))?;
 
-        tracing::info!("保存答题状态: {} -> {}", key, state.question_id);
+                client
+                    .set(&key, value, self.config.quiz_expire)
+                    .map_err(|e| format!("写入 Memcached 失败: {}", e))?;
+
+                tracing::info!("保存答题状态到Memcached: {} -> {}", key, state.question_id);
+                return Ok(());
+            }
+        }
+
+        // 降级到内存缓存
+        let expire_time = chrono::Utc::now().timestamp() + self.config.quiz_expire as i64;
+        let mut cache = self.memory_cache.lock().map_err(|e| format!("获取缓存锁失败: {}", e))?;
+        cache.insert(key.clone(), (state.clone(), expire_time));
+        tracing::info!("保存答题状态到内存缓存: {} -> {}", key, state.question_id);
         Ok(())
     }
 
@@ -121,39 +166,73 @@ impl MemcachedClient {
     pub fn get_quiz_state(&self, uid: &str) -> Result<Option<QuizState>, String> {
         let key = Self::quiz_key(uid);
 
-        let value: Option<String> = self.client
-            .get(&key)
-            .map_err(|e| format!("读取 Memcached 失败: {}", e))?;
+        if self.available {
+            if let Some(ref client) = self.client {
+                let value: Option<String> = client
+                    .get(&key)
+                    .map_err(|e| format!("读取 Memcached 失败: {}", e))?;
 
-        match value {
-            Some(json) => {
-                let state: QuizState = serde_json::from_str(&json)
-                    .map_err(|e| format!("解析答题状态失败: {}", e))?;
-                tracing::info!("获取答题状态: {} -> {}", key, state.question_id);
-                Ok(Some(state))
-            }
-            None => {
-                tracing::info!("答题状态不存在: {}", key);
-                Ok(None)
+                match value {
+                    Some(json) => {
+                        let state: QuizState = serde_json::from_str(&json)
+                            .map_err(|e| format!("解析答题状态失败: {}", e))?;
+                        tracing::info!("从Memcached获取答题状态: {} -> {}", key, state.question_id);
+                        return Ok(Some(state));
+                    }
+                    None => {
+                        tracing::info!("Memcached中答题状态不存在: {}", key);
+                        return Ok(None);
+                    }
+                }
             }
         }
+
+        // 降级到内存缓存
+        let mut cache = self.memory_cache.lock().map_err(|e| format!("获取缓存锁失败: {}", e))?;
+        let now = chrono::Utc::now().timestamp();
+
+        if let Some((state, expire_time)) = cache.get(&key) {
+            if now < *expire_time {
+                tracing::info!("从内存缓存获取答题状态: {} -> {}", key, state.question_id);
+                return Ok(Some(state.clone()));
+            } else {
+                // 已过期，删除
+                cache.remove(&key);
+                tracing::info!("内存缓存中的答题状态已过期: {}", key);
+            }
+        }
+
+        Ok(None)
     }
 
     /// 删除答题状态
     pub fn delete_quiz_state(&self, uid: &str) -> Result<(), String> {
         let key = Self::quiz_key(uid);
 
-        self.client
-            .delete(&key)
-            .map_err(|e| format!("删除 Memcached 失败: {}", e))?;
+        if self.available {
+            if let Some(ref client) = self.client {
+                client
+                    .delete(&key)
+                    .map_err(|e| format!("删除 Memcached 失败: {}", e))?;
+                tracing::info!("从Memcached删除答题状态: {}", key);
+                return Ok(());
+            }
+        }
 
-        tracing::info!("删除答题状态: {}", key);
+        // 降级到内存缓存
+        let mut cache = self.memory_cache.lock().map_err(|e| format!("获取缓存锁失败: {}", e))?;
+        cache.remove(&key);
+        tracing::info!("从内存缓存删除答题状态: {}", key);
         Ok(())
     }
 
     /// 检查连接状态
     pub fn is_connected(&self) -> bool {
-        self.client.stats().is_ok()
+        if let Some(ref client) = self.client {
+            client.stats().is_ok()
+        } else {
+            false
+        }
     }
 }
 
@@ -178,8 +257,7 @@ pub static MEMCACHED_CLIENT: Lazy<Arc<MemcachedClient>> = Lazy::new(|| {
             Arc::new(client)
         }
         Err(e) => {
-            tracing::warn!("Memcached 客户端初始化失败（将使用数据库降级模式）: {}", e);
-            // 返回一个不可用的客户端
+            tracing::warn!("Memcached 客户端初始化失败，使用内存缓存降级模式: {}", e);
             Arc::new(MemcachedClient::unavailable())
         }
     }
@@ -216,5 +294,28 @@ mod tests {
     fn test_quiz_key() {
         let key = MemcachedClient::quiz_key("user123");
         assert_eq!(key, "daily_quiz:user123");
+    }
+
+    #[test]
+    fn test_unavailable_client() {
+        let client = MemcachedClient::unavailable();
+        assert!(!client.is_available());
+
+        let state = QuizState::new(
+            "subj001".to_string(),
+            "三年级".to_string(),
+            "数学".to_string(),
+            "q001".to_string(),
+            "1+1=?".to_string(),
+            "2".to_string(),
+            "简单加法".to_string(),
+            50,
+        );
+
+        // 测试内存缓存
+        client.set_quiz_state("test_user", &state).unwrap();
+        let retrieved = client.get_quiz_state("test_user").unwrap();
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().question_id, "q001");
     }
 }
