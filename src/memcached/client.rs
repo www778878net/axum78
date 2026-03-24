@@ -90,7 +90,8 @@ pub struct MemcachedClient {
 impl MemcachedClient {
     /// 创建新客户端
     pub fn new(config: MemcachedConfig) -> Result<Self, String> {
-        let url = format!("tcp://{}:{}", config.host, config.port);
+        // memcache 库使用 memcache:// 协议前缀
+        let url = format!("memcache://{}:{}", config.host, config.port);
         let client = Client::connect(url.as_str())
             .map_err(|e| format!("连接 Memcached 失败: {}", e))?;
 
@@ -177,9 +178,9 @@ pub static MEMCACHED_CLIENT: Lazy<Arc<MemcachedClient>> = Lazy::new(|| {
             Arc::new(client)
         }
         Err(e) => {
-            tracing::error!("Memcached 客户端初始化失败: {}", e);
-            // 返回一个占位客户端（实际不可用）
-            panic!("Memcached 客户端初始化失败: {}", e);
+            tracing::warn!("Memcached 客户端初始化失败（将使用数据库降级模式）: {}", e);
+            // 返回一个不可用的客户端
+            Arc::new(MemcachedClient::unavailable())
         }
     }
 });

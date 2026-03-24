@@ -45,10 +45,10 @@ rand = "0.8"
 regex = "1"
 
 # HTTP 客户端 (用于同步)
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
 
-# Memcached 客户端
-memcache = "0.18"
+# Memcached 客户端 (禁用tls，避免openssl依赖)
+memcache = { version = "0.18", default-features = false }
 
 [dev-dependencies]
 serial_test = "3"
