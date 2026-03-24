@@ -13,7 +13,7 @@ use axum::{
 use base::Response;
 use sha1::{Sha1, Digest};
 use std::collections::HashMap;
-use crate::get_wework_config;
+use crate::{get_wework_config, database::daily::{self, DailySubject, DailyUserScore, DailyAnswerRecord}};
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use base64::{Engine as _, engine::general_purpose};
 
@@ -457,12 +457,24 @@ async fn handle_menu_click(
     };
     
     tracing::info!("菜单点击: event_key={}, menu_id={}", event_key, menu_id);
-    
+
     // 检查是否是每日一炼菜单
     let menu_config = get_daily_menu_config();
     if let Some(menu_subject) = menu_config.get(menu_id) {
-        // 调用出题 API
-        return handle_daily_quiz_generate(&user.sid, &menu_subject.grade, &menu_subject.subject, user.money78 as i32).await;
+        // 查询daily_subject表验证科目是否有效
+        let subject_db = db::DailySubject::new();
+        let subject_record = match subject_db.find_subject(&menu_subject.subject, &menu_subject.grade) {
+            Some(rec) => rec,
+            None => {
+                tracing::warn!("科目未找到或已禁用: {} {}", menu_subject.subject, menu_subject.grade);
+                return Some(format!("该科目暂未开放：{}{}", menu_subject.grade, menu_subject.subject));
+            }
+        };
+
+        tracing::info!("找到科目: id={}, name={}, grade={}", subject_record.idsubject, subject_record.myname, subject_record.grade);
+
+        // 调用出题 API，传入科目ID
+        return handle_daily_quiz_generate(&user.sid, &subject_record.idsubject, &menu_subject.grade, &menu_subject.subject, user.money78 as i32).await;
     }
     
     // 其他菜单处理
@@ -484,36 +496,36 @@ async fn handle_menu_click(
 }
 
 /// 处理出题请求
-async fn handle_daily_quiz_generate(uid: &str, grade: &str, subject: &str, current_score: i32) -> Option<String> {
+async fn handle_daily_quiz_generate(uid: &str, idsubject: &str, grade: &str, subject_name: &str, current_score: i32) -> Option<String> {
     use crate::memcached::{get_memcached_client, QuizState};
-    
-    tracing::info!("开始出题: uid={}, grade={}, subject={}", uid, grade, subject);
-    
-    // 调用出题 API
-    match crate::generate_question(grade, subject, Some(current_score)).await {
+
+    tracing::info!("开始出题: uid={}, idsubject={}, grade={}, subject={}", uid, idsubject, grade, subject_name);
+
+    // 调用出题 API（传入科目名称，不是ID）
+    match crate::generate_question(grade, subject_name, Some(current_score)).await {
         Ok(result) => {
             // 存储到 Memcached
             let quiz_state = QuizState::new(
-                subject.to_string(), // idsubject 暂时用科目名
+                idsubject.to_string(),
                 grade.to_string(),
-                subject.to_string(),
+                subject_name.to_string(),
                 result.question_id.clone(),
                 result.question.clone(),
                 result.standard_answer.clone(),
                 result.explanation.clone(),
                 result.score_difficulty,
             );
-            
+
             if let Err(e) = get_memcached_client().set_quiz_state(uid, &quiz_state) {
                 tracing::error!("存储答题状态失败: {}", e);
                 return Some("出题成功，但存储失败，请重试".to_string());
             }
-            
+
             // 格式化返回消息
             let hint_text = result.hint.map(|h| format!("\n提示：{}", h)).unwrap_or_default();
             Some(format!(
                 "【{}{}题】\n{}{}\n\n请直接回复答案",
-                grade, subject, result.question, hint_text
+                grade, subject_name, result.question, hint_text
             ))
         }
         Err(e) => {
@@ -526,11 +538,12 @@ async fn handle_daily_quiz_generate(uid: &str, grade: &str, subject: &str, curre
 /// 处理判题请求
 async fn handle_daily_quiz_judge(wechat_userid: &str, user_answer: &str) -> Option<String> {
     use crate::memcached::get_memcached_client;
-    
+    use db::{DailyUserScore, DailyAnswerRecord};
+
     // 先登录用户获取 uid
     let user = login_user(wechat_userid).await.ok()?;
     let uid = &user.sid;
-    
+
     // 获取答题状态
     let quiz_state = match get_memcached_client().get_quiz_state(uid) {
         Ok(Some(state)) => state,
@@ -543,18 +556,18 @@ async fn handle_daily_quiz_judge(wechat_userid: &str, user_answer: &str) -> Opti
             return Some("系统错误，请重试".to_string());
         }
     };
-    
+
     // 检查是否过期
     if quiz_state.is_expired(300) {
         let _ = get_memcached_client().delete_quiz_state(uid);
         return Some("答题已超时，请重新选择科目".to_string());
     }
-    
+
     tracing::info!("开始判题: uid={}, answer={}", uid, user_answer);
-    
+
     // 获取用户当前能力分
     let current_score = user.money78;
-    
+
     // 调用判题 API
     match crate::judge_answer(
         uid,
@@ -570,7 +583,37 @@ async fn handle_daily_quiz_judge(wechat_userid: &str, user_answer: &str) -> Opti
         Ok(result) => {
             // 删除答题状态
             let _ = get_memcached_client().delete_quiz_state(uid);
-            
+
+            // 更新用户积分和能力分
+            let score_db = daily::DailyUserScore::new();
+            if let Err(e) = score_db.update_score(
+                uid,
+                &quiz_state.subject,
+                &quiz_state.grade,
+                result.is_correct,
+                result.points_change,
+                result.score_change,
+            ) {
+                tracing::error!("更新用户积分失败: {}", e);
+            }
+
+            // 记录答题历史
+            let record_db = daily::DailyAnswerRecord::new();
+            let _ = record_db.insert(
+                uid,
+                &quiz_state.idsubject,
+                &quiz_state.question_id,
+                &quiz_state.question,
+                user_answer,
+                &quiz_state.standard_answer,
+                result.is_correct,
+                result.points_change,
+                result.score_change,
+                quiz_state.score_difficulty,
+                &quiz_state.explanation,
+                &result.feedback,
+            );
+
             // 格式化返回消息
             let correct_text = if result.is_correct { "回答正确！" } else { "回答错误" };
             let score_change_text = if result.score_change > 0 {
@@ -578,7 +621,7 @@ async fn handle_daily_quiz_judge(wechat_userid: &str, user_answer: &str) -> Opti
             } else {
                 result.score_change.to_string()
             };
-            
+
             Some(format!(
                 "{} +{}积分\n能力分: {} ({}{})\n\n【解析】\n{}",
                 correct_text,
