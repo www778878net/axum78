@@ -1,15 +1,10 @@
 //! 每日一炼核心模块
 //!
-//! 提供 LLM 调用、出题、判题功能，以及积分更新和答题记录
+//! 提供 LLM 调用、出题、判题功能
 
 use base::ProjectPath;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-/// 导出数据库结构体
-pub mod db {
-    pub use crate::database::daily::{subject::DailySubject, user_score::DailyUserScore, answer_record::DailyAnswerRecord};
-}
 
 /// 出题响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,7 +96,7 @@ async fn call_modelscope(prompt: &str) -> Result<serde_json::Value, String> {
 }
 
 /// 读取提示词模板
-fn load_prompt(template_name: &str, params: HashMap<&str, &str>) -> Result<String, String> {
+fn load_prompt(template_name: &str, params: HashMap<&str, String>) -> Result<String, String> {
     let project_path = ProjectPath::find()
         .map_err(|e| format!("查找项目根目录失败: {}", e))?;
     let prompt_path = project_path.join("refs").join(template_name);
@@ -111,7 +106,7 @@ fn load_prompt(template_name: &str, params: HashMap<&str, &str>) -> Result<Strin
 
     let mut result = content;
     for (key, value) in params {
-        result = result.replace(&format!("{{{{{}}}}}", key), value);
+        result = result.replace(&format!("{{{{{}}}}}", key), &value);
     }
 
     Ok(result)
@@ -133,12 +128,12 @@ pub async fn generate_question(
 
     // 加载出题提示词模板
     let mut params = HashMap::new();
-    params.insert("grade", grade);
-    params.insert("subject", subject);
-    params.insert("score_min", &score_min.to_string());
-    params.insert("score_max", &score_max.to_string());
-    params.insert("target_min", &target_min.to_string());
-    params.insert("target_max", &target_max.to_string());
+    params.insert("grade", grade.to_string());
+    params.insert("subject", subject.to_string());
+    params.insert("score_min", score_min.to_string());
+    params.insert("score_max", score_max.to_string());
+    params.insert("target_min", target_min.to_string());
+    params.insert("target_max", target_max.to_string());
 
     let prompt = load_prompt("daily_quiz_prompt.md", params)?;
 
@@ -201,14 +196,14 @@ pub async fn judge_answer(
 
     // 加载判题提示词模板
     let mut params = HashMap::new();
-    params.insert("grade", grade);
-    params.insert("subject", subject);
-    params.insert("question", question);
-    params.insert("standard_answer", standard_answer);
-    params.insert("user_answer", user_answer);
-    params.insert("current_score", &current_score.to_string());
-    params.insert("question_difficulty", &question_difficulty.to_string());
-    params.insert("explanation", explanation);
+    params.insert("grade", grade.to_string());
+    params.insert("subject", subject.to_string());
+    params.insert("question", question.to_string());
+    params.insert("standard_answer", standard_answer.to_string());
+    params.insert("user_answer", user_answer.to_string());
+    params.insert("current_score", current_score.to_string());
+    params.insert("question_difficulty", question_difficulty.to_string());
+    params.insert("explanation", explanation.to_string());
 
     let prompt = load_prompt("daily_judge_prompt.md", params)?;
 
@@ -245,7 +240,7 @@ pub async fn judge_answer(
         .map(|s| s.to_string())
         .ok_or_else(|| "缺少feedback字段".to_string())?;
 
-    let explanation = result.get("explanation")
+    let explanation_result = result.get("explanation")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| "缺少explanation字段".to_string())?;
@@ -261,12 +256,12 @@ pub async fn judge_answer(
         .ok_or_else(|| "缺少points_change字段".to_string())?;
 
     Ok(QuizJudgeResult {
-        is_correct: *is_correct,
-        score_change: *score_change,
-        feedback: feedback.clone(),
-        explanation: explanation.clone(),
-        new_score: *new_score,
-        points_change: *points_change,
+        is_correct,
+        score_change,
+        feedback,
+        explanation: explanation_result,
+        new_score,
+        points_change,
     })
 }
 
