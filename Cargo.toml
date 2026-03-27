@@ -21,7 +21,7 @@ prost = "0.13"
 async-trait = "0.1"
 
 # 数据库
-datastate = { git = "https://github.com/www778878net/datastate.git" }
+database = { git = "https://github.com/www778878net/datastate.git", package = "datastate" }
 base = { git = "https://github.com/www778878net/rustbase.git" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 mysql = "25"

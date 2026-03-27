@@ -224,20 +224,39 @@ impl Default for LoversDataState {
 // ============================================================
 
 /// MySQL 连接池（全局单例）
-static MYSQL_POOL: once_cell::sync::Lazy<Arc<Mutex<Option<Arc<Mysql78>>>>> = 
+static MYSQL_POOL: once_cell::sync::Lazy<Arc<Mutex<Option<Arc<Mysql78>>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
-/// 获取 MySQL 配置
+/// 获取 MySQL 配置（从配置文件读取，优先使用环境变量）
 fn get_mysql_config() -> MysqlConfig {
+    let config = base::ProjectPath::find()
+        .ok()
+        .and_then(|p| p.load_ini_config().ok());
+
+    let mysql_section = config.as_ref().and_then(|c| c.get("mysql"));
+
     MysqlConfig {
-        host: std::env::var("MYSQL_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
+        host: std::env::var("MYSQL_HOST")
+            .ok()
+            .or_else(|| mysql_section.and_then(|s| s.get("host").cloned()))
+            .unwrap_or_else(|| "127.0.0.1".to_string()),
         port: std::env::var("MYSQL_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
+            .or_else(|| mysql_section.and_then(|s| s.get("port").and_then(|p| p.parse().ok())))
             .unwrap_or(3306),
-        user: std::env::var("MYSQL_USER").unwrap_or_else(|_| "root".to_string()),
-        password: std::env::var("MYSQL_PASSWORD").unwrap_or_default(),
-        database: std::env::var("MYSQL_DATABASE").unwrap_or_else(|_| "testdb".to_string()),
+        user: std::env::var("MYSQL_USER")
+            .ok()
+            .or_else(|| mysql_section.and_then(|s| s.get("user").cloned()))
+            .unwrap_or_else(|| "root".to_string()),
+        password: std::env::var("MYSQL_PASSWORD")
+            .ok()
+            .or_else(|| mysql_section.and_then(|s| s.get("password").cloned()))
+            .unwrap_or_default(),
+        database: std::env::var("MYSQL_DATABASE")
+            .ok()
+            .or_else(|| mysql_section.and_then(|s| s.get("database").cloned()))
+            .unwrap_or_else(|| "testdb".to_string()),
         max_connections: 10,
         is_log: false,
         is_count: false,
@@ -281,14 +300,18 @@ impl LoversDataStateMysql {
     }
 
     /// 查找或创建用户（企业微信登录）
-    /// 
+    ///
     /// # 参数
     /// - wechat_userid: 微信用户ID (FromUserName)
     /// - user_type: 用户类型 (internal/external)
     /// - corp_id: 企业ID
-    /// 
+    ///
     /// # 返回
     /// - UserInfo: 用户完整信息
+    ///
+    /// # 表结构说明
+    /// - lovers: id (主键), uname, idcodef (公司ID), cid, truename, mobile
+    /// - lovers_auth: id, iduser (关联 lovers.id), sid, sid_web
     pub fn find_or_create_user(
         &self,
         wechat_userid: &str,
@@ -311,75 +334,136 @@ impl LoversDataStateMysql {
         if !rows.is_empty() {
             // 用户已存在，更新 SID
             let user = &rows[0];
-            let idpk = user.get("idpk").and_then(|v| v.as_i64()).unwrap_or(0);
 
-            // 更新 lovers_auth 表的 sid
-            let update_sid = "UPDATE lovers_auth SET sid = ?, uptime = ? WHERE ikuser = ?";
+            // id 可能是字符串或数字类型（MySQL 驱动可能将数字字符串解析为 Int）
+            let user_id = user.get("id")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .or_else(|| user.get("id").and_then(|v| v.as_i64().map(|n| n.to_string())))
+                .or_else(|| user.get("id").and_then(|v| v.as_u64().map(|n| n.to_string())))
+                .unwrap_or_default();
+
+            tracing::info!("用户已存在: user_id={}, uname={}", user_id, uname);
+
+            if user_id.is_empty() {
+                return Err("用户 ID 为空".to_string());
+            }
+
+            // 更新 lovers_auth 表的 sid (使用 iduser 关联)
+            let update_sid = "UPDATE lovers_auth SET sid = ?, uptime = ? WHERE iduser = ?";
             self.mysql.do_m(update_sid, vec![
                 Value::String(sid.clone()),
                 Value::String(now.clone()),
-                Value::Number(idpk.into()),
+                Value::String(user_id.to_string()),
             ], &up).map_err(|e| format!("更新SID失败: {}", e))?;
 
             // 获取用户完整信息
             let user_query = r#"
-                SELECT l.*, la.sid, lb.money78, lb.consume, c.coname
+                SELECT l.id, l.uname, l.idcodef, l.cid, l.truename, l.mobile, la.sid
                 FROM lovers l
-                JOIN lovers_auth la ON l.idpk = la.ikuser
-                JOIN lovers_balance lb ON l.idpk = lb.ikuser
-                LEFT JOIN companys c ON l.idcodef = c.id
-                WHERE l.idpk = ?
+                JOIN lovers_auth la ON l.id = la.iduser
+                WHERE l.id = ?
             "#;
-            
-            let user_rows = self.mysql.do_get(user_query, vec![Value::Number(idpk.into())], &up)
+
+            let user_rows = self.mysql.do_get(user_query, vec![Value::String(user_id.to_string())], &up)
                 .map_err(|e| format!("获取用户信息失败: {}", e))?;
 
             if !user_rows.is_empty() {
                 let row = &user_rows[0];
-                return Ok(UserInfo::from_row(row, wechat_userid, user_type));
+                // id 可能是字符串或数字类型
+                let user_id_from_row = row.get("id")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .or_else(|| row.get("id").and_then(|v| v.as_i64().map(|n| n.to_string())))
+                    .or_else(|| row.get("id").and_then(|v| v.as_u64().map(|n| n.to_string())))
+                    .unwrap_or_default();
+
+                return Ok(UserInfo {
+                    idpk: 0,
+                    id: user_id_from_row,
+                    uname: row.get("uname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    truename: row.get("truename").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    idcodef: row.get("idcodef").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    coname: String::new(),
+                    mobile: row.get("mobile").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    sid: row.get("sid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    money78: 0,
+                    consume: 0,
+                    wechat_userid: wechat_userid.to_string(),
+                    user_type: user_type.to_string(),
+                    is_new: false,
+                });
             } else {
-                return Err(format!("用户数据不完整: idpk={}", idpk));
+                // 没有 auth 记录，创建一个
+                let auth_id = next_id_string();
+                let auth_insert = r#"
+                    INSERT INTO lovers_auth (id, iduser, sid, sid_web, sid_web_date, upby, uptime, uid)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                "#;
+                self.mysql.do_m_add(auth_insert, vec![
+                    Value::String(auth_id),
+                    Value::String(user_id.to_string()),
+                    Value::String(sid.clone()),
+                    Value::String(sid.clone()),
+                    Value::String(now.clone()),
+                    Value::String(uname.clone()),
+                    Value::String(now.clone()),
+                    Value::String(sid.clone()),
+                ], &up).map_err(|e| format!("创建认证记录失败: {}", e))?;
+
+                return Ok(UserInfo {
+                    idpk: 0,
+                    id: user_id.to_string(),
+                    uname: uname.clone(),
+                    truename: wechat_userid.to_string(),
+                    idcodef: user.get("idcodef").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    coname: String::new(),
+                    mobile: String::new(),
+                    sid,
+                    money78: 0,
+                    consume: 0,
+                    wechat_userid: wechat_userid.to_string(),
+                    user_type: user_type.to_string(),
+                    is_new: false,
+                });
             }
         }
 
         // 用户不存在，创建新用户
         let cid_guest = "GUEST000-8888-8888-8888-GUEST00GUEST";
-        let id = next_id_string();
+        let user_id = next_id_string();
 
         // 插入 lovers 表
         let lovers_insert = r#"
-            INSERT INTO lovers (uname, truename, idcodef, referrer, mobile, openweixin, id, upby, uptime) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO lovers (id, uname, truename, idcodef, cid, referrer, mobile, openweixin, upby, uptime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#;
         let lovers_values = vec![
+            Value::String(user_id.clone()),
             Value::String(uname.clone()),
             Value::String(wechat_userid.to_string()),
+            Value::String(cid_guest.to_string()),
             Value::String(cid_guest.to_string()),
             Value::String(String::new()),
             Value::String(String::new()),
             Value::String("企业微信".to_string()),
-            Value::String(id.clone()),
             Value::String(uname.clone()),
             Value::String(now.clone()),
         ];
 
-        let insert_result = self.mysql.do_m_add(lovers_insert, lovers_values, &up)
+        self.mysql.do_m_add(lovers_insert, lovers_values, &up)
             .map_err(|e| format!("创建用户失败: {}", e))?;
 
-        let midpk = insert_result.insert_id;
-
         // 插入 lovers_auth 表
+        let auth_id = next_id_string();
         let auth_insert = r#"
-            INSERT INTO lovers_auth (ikuser, pwd, sid, sid_web, sid_web_date, id, upby, uptime, uid) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO lovers_auth (id, iduser, sid, sid_web, sid_web_date, upby, uptime, uid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         "#;
         let auth_values = vec![
-            Value::Number(midpk.into()),
-            Value::String(String::new()),
+            Value::String(auth_id),
+            Value::String(user_id.clone()),
             Value::String(sid.clone()),
             Value::String(sid.clone()),
             Value::String(now.clone()),
-            Value::String(next_id_string()),
             Value::String(uname.clone()),
             Value::String(now.clone()),
             Value::String(sid.clone()),
@@ -387,24 +471,23 @@ impl LoversDataStateMysql {
         self.mysql.do_m_add(auth_insert, auth_values, &up)
             .map_err(|e| format!("创建认证记录失败: {}", e))?;
 
-        // 插入 lovers_balance 表
-        let balance_insert = r#"
-            INSERT INTO lovers_balance (ikuser, money78, consume, id, upby, uptime, uid) 
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        "#;
-        let balance_values = vec![
-            Value::Number(midpk.into()),
-            Value::Number(0.into()),
-            Value::Number(0.into()),
-            Value::String(next_id_string()),
-            Value::String(uname.clone()),
-            Value::String(now.clone()),
-            Value::String(sid.clone()),
-        ];
-        self.mysql.do_m_add(balance_insert, balance_values, &up)
-            .map_err(|e| format!("创建余额记录失败: {}", e))?;
+        tracing::info!("创建新用户: user_id={}, uname={}", user_id, uname);
 
-        Ok(UserInfo::new_user(midpk, &sid, &uname, wechat_userid, user_type))
+        Ok(UserInfo {
+            idpk: 0,
+            id: user_id,
+            uname,
+            truename: wechat_userid.to_string(),
+            idcodef: cid_guest.to_string(),
+            coname: String::new(),
+            mobile: String::new(),
+            sid,
+            money78: 0,
+            consume: 0,
+            wechat_userid: wechat_userid.to_string(),
+            user_type: user_type.to_string(),
+            is_new: true,
+        })
     }
 
     /// 验证 SID
