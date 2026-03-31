@@ -9,7 +9,7 @@
 //! LoversDataStateMysql - 基于 MySQL 的用户状态管理
 //! 支持 find_or_create_user（企业微信登录）
 
-use database::{DataSync, BaseState, TableConfig, Mysql78, MysqlConfig, MysqlUpInfo, next_id_string};
+use datastate::{DataSync, BaseState, TableConfig, Mysql78, MysqlConfig, MysqlUpInfo, next_id_string};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

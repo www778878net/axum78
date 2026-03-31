@@ -7,7 +7,7 @@
 //! - 权限检查
 //! - 通用CRUD方法
 
-use database::{DataState, LocalDB};
+use datastate::{DataState, LocalDB};
 use base::{MyLogger, UpInfo};
 use serde_json::Value;
 use std::collections::HashMap;
