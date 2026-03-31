@@ -214,3 +214,128 @@ impl CidBase78 {
         self.base.do_get(sql, params).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_base78_new() {
+        let base = Base78::new("test_table", "cid");
+        assert_eq!(base.tbname, "test_table");
+        assert_eq!(base.uidcid, "cid");
+        assert!(!base.isadmin);
+    }
+
+    #[test]
+    fn test_base78_set_admin() {
+        let mut base = Base78::new("test_table", "cid");
+        base.set_admin();
+        assert!(base.isadmin);
+    }
+
+    #[test]
+    fn test_cid_base78_new() {
+        let cid_base = CidBase78::new("test_table");
+        assert_eq!(cid_base.base.tbname, "test_table");
+        assert_eq!(cid_base.base.uidcid, "cid");
+    }
+
+    #[test]
+    fn test_cid_base78_set_admin() {
+        let mut cid_base = CidBase78::new("test_table");
+        cid_base.set_admin();
+        assert!(cid_base.base.isadmin);
+    }
+
+    #[test]
+    fn test_validate_params_success() {
+        let base = Base78::new("test_table", "cid");
+        let mut up = UpInfo::new();
+        up.jsdata = Some(r#"["param1", "param2", "param3"]"#.to_string());
+
+        let result = base.validate_params(&up, 2);
+        assert!(result.is_ok());
+        let params = result.unwrap();
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn test_validate_params_insufficient() {
+        let base = Base78::new("test_table", "cid");
+        let mut up = UpInfo::new();
+        up.jsdata = Some(r#"["param1"]"#.to_string());
+
+        let result = base.validate_params(&up, 2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("参数数量不足"));
+    }
+
+    #[test]
+    fn test_validate_params_missing_jsdata() {
+        let base = Base78::new("test_table", "cid");
+        let up = UpInfo::new();
+
+        let result = base.validate_params(&up, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("缺少参数"));
+    }
+
+    #[test]
+    fn test_validate_params_invalid_json() {
+        let base = Base78::new("test_table", "cid");
+        let mut up = UpInfo::new();
+        up.jsdata = Some("invalid json".to_string());
+
+        let result = base.validate_params(&up, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("参数格式错误"));
+    }
+
+    #[test]
+    fn test_validate_required_empty() {
+        let base = Base78::new("test_table", "cid");
+        let result = base.validate_required("", "字段名");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("不能为空"));
+    }
+
+    #[test]
+    fn test_validate_required_not_empty() {
+        let base = Base78::new("test_table", "cid");
+        let result = base.validate_required("value", "字段名");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_range_valid() {
+        let base = Base78::new("test_table", "cid");
+        let result = base.validate_range(50, 0, 100, "数值");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_range_invalid_too_small() {
+        let base = Base78::new("test_table", "cid");
+        let result = base.validate_range(-1, 0, 100, "数值");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("必须在"));
+    }
+
+    #[test]
+    fn test_validate_range_invalid_too_large() {
+        let base = Base78::new("test_table", "cid");
+        let result = base.validate_range(101, 0, 100, "数值");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("必须在"));
+    }
+
+    #[test]
+    fn test_check_admin_permission_not_admin() {
+        let base = Base78::new("test_table", "cid");
+        let up = UpInfo::new();
+        // isadmin 为 false，应该直接返回 Ok
+        let result = base.check_admin_permission(&up);
+        assert!(result.is_ok());
+    }
+}

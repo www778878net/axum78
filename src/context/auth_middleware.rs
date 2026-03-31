@@ -263,3 +263,138 @@ pub async fn sid_auth_middleware(
     
     next.run(builder).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_auth_config_default() {
+        let config = AuthConfig::default();
+        assert!(config.skip_apisys.is_empty());
+        assert!(config.skip_apimicro.is_empty());
+        assert!(config.skip_routes.is_empty());
+    }
+
+    #[test]
+    fn test_auth_config_should_skip_apisys() {
+        let mut config = AuthConfig::default();
+        config.skip_apisys.insert("apiguest".to_lowercase());
+
+        assert!(config.should_skip("apiguest", "test", "demo"));
+        assert!(config.should_skip("APIGUEST", "test", "demo")); // 大小写不敏感
+        assert!(!config.should_skip("apiuser", "test", "demo"));
+    }
+
+    #[test]
+    fn test_auth_config_should_skip_apimicro() {
+        let mut config = AuthConfig::default();
+        config.skip_apimicro.insert("apitest/test".to_lowercase());
+
+        assert!(config.should_skip("apitest", "test", "demo"));
+        assert!(config.should_skip("APITEST", "TEST", "demo")); // 大小写不敏感
+        assert!(!config.should_skip("apitest", "other", "demo"));
+    }
+
+    #[test]
+    fn test_auth_config_should_skip_routes() {
+        let mut config = AuthConfig::default();
+        config.skip_routes.insert("apiuser/user/login".to_lowercase());
+
+        assert!(config.should_skip("apiuser", "user", "login"));
+        assert!(config.should_skip("APIUSER", "USER", "LOGIN")); // 大小写不敏感
+        assert!(!config.should_skip("apiuser", "user", "logout"));
+    }
+
+    #[test]
+    fn test_auth_config_should_not_skip() {
+        let config = AuthConfig::default();
+        // 默认配置为空，不应跳过任何路由
+        assert!(!config.should_skip("apiuser", "user", "login"));
+        assert!(!config.should_skip("apitest", "test", "demo"));
+    }
+
+    #[test]
+    fn test_minimal_request_default() {
+        let req = MinimalRequest::default();
+        assert!(req.sid.is_empty());
+        assert!(req.cid.is_empty());
+        assert!(req.uid.is_empty());
+        assert_eq!(req.uname, "guest");
+        assert_eq!(req.getstart, 0);
+        assert_eq!(req.getnumber, 15);
+        assert_eq!(req.order, "idpk desc");
+        assert!(req.bcid.is_empty());
+        assert!(req.mid.is_empty());
+        assert!(req.jsdata.is_none());
+        assert!(req.bytedata.is_none());
+    }
+
+    #[test]
+    fn test_minimal_request_to_upinfo() {
+        let mut min = MinimalRequest::default();
+        min.sid = "test_sid".to_string();
+        min.cid = "test_cid".to_string();
+        min.uid = "test_uid".to_string();
+        min.uname = "test_user".to_string();
+        min.getstart = 10;
+        min.getnumber = 20;
+        min.order = "id asc".to_string();
+        min.bcid = "test_bcid".to_string();
+        min.mid = "test_mid".to_string();
+        min.jsdata = Some(r#"{"key":"value"}"#.to_string());
+
+        let up: UpInfo = min.into();
+
+        assert_eq!(up.sid, "test_sid");
+        assert_eq!(up.cid, "test_cid");
+        assert_eq!(up.uid, "test_uid");
+        assert_eq!(up.uname, "test_user");
+        assert_eq!(up.getstart, 10);
+        assert_eq!(up.getnumber, 20);
+        assert_eq!(up.order, "id asc");
+        assert_eq!(up.bcid, "test_bcid");
+        assert_eq!(up.mid, "test_mid");
+        assert_eq!(up.jsdata, Some(r#"{"key":"value"}"#.to_string()));
+    }
+
+    #[test]
+    fn test_minimal_request_json_deserialize() {
+        let json = r#"{
+            "sid": "json_sid",
+            "cid": "json_cid",
+            "uid": "json_uid",
+            "uname": "json_user",
+            "getstart": 5,
+            "getnumber": 25,
+            "order": "uptime desc",
+            "bcid": "json_bcid",
+            "mid": "json_mid",
+            "jsdata": "[1, 2, 3]"
+        }"#;
+
+        let req: MinimalRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.sid, "json_sid");
+        assert_eq!(req.cid, "json_cid");
+        assert_eq!(req.uid, "json_uid");
+        assert_eq!(req.uname, "json_user");
+        assert_eq!(req.getstart, 5);
+        assert_eq!(req.getnumber, 25);
+        assert_eq!(req.order, "uptime desc");
+        assert_eq!(req.bcid, "json_bcid");
+        assert_eq!(req.mid, "json_mid");
+        assert_eq!(req.jsdata, Some("[1, 2, 3]".to_string()));
+    }
+
+    #[test]
+    fn test_minimal_request_json_partial() {
+        let json = r#"{"sid": "partial_sid"}"#;
+
+        let req: MinimalRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.sid, "partial_sid");
+        // 其他字段使用类型的默认值（serde default 使用类型默认值）
+        assert!(req.cid.is_empty());
+        assert!(req.uname.is_empty()); // serde default 使用 String::default() 而非结构体 Default
+        assert_eq!(req.getnumber, 0); // serde default 使用 i32::default()
+    }
+}
