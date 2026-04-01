@@ -8,8 +8,8 @@
 
 use base::UpInfo;
 use base64::Engine;
-use database::datastate::TestTb;
-use database::next_id_string;
+use datastate::datastate::TestTb;
+use datastate::next_id_string;
 use prost::Message;
 
 #[derive(Clone, PartialEq, Message)]
@@ -230,12 +230,12 @@ async fn test_all_plans() {
     let _up = UpInfo::new();
 
     // 初始化默认数据库中的 lovers 和 lovers_auth 表（用于 SID 验证）
-    let default_db = database::LocalDB::default_instance().expect("获取默认数据库失败");
+    let default_db = datastate::LocalDB::default_instance().expect("获取默认数据库失败");
     let _ = default_db.execute(axum78::LOVERS_CREATE_SQL);
     let _ = default_db.execute(axum78::LOVERS_AUTH_CREATE_SQL);
 
     // 插入测试用户
-    let test_user_id = database::next_id_string();
+    let test_user_id = datastate::next_id_string();
     let _ = default_db.execute_with_params(
         "INSERT OR REPLACE INTO lovers (id, uname, idcodef, cid, uid) VALUES (?, ?, ?, ?, ?)",
         &[&test_user_id as &dyn rusqlite::ToSql, &"test_user", &CID, &CID, &"test_uid"],
@@ -255,7 +255,7 @@ async fn test_all_plans() {
     let remote_testtb = TestTb::with_db_path(remote_db_path);
     let _ = remote_testtb.db.execute("DROP TABLE IF EXISTS testtb");
     let _ = remote_testtb.db.execute("DELETE FROM synclog WHERE tbname='testtb'");
-    let _ = remote_testtb.db.execute(database::datastate::TESTTB_CREATE_SQL);
+    let _ = remote_testtb.db.execute(datastate::datastate::TESTTB_CREATE_SQL);
     println!("远程数据库: 已重建testtb表");
 
     // 删除旧表并重新创建（本地数据库）
@@ -264,7 +264,7 @@ async fn test_all_plans() {
     let local_testtb = TestTb::with_db_path(local_db_path);
     let _ = local_testtb.db.execute("DROP TABLE IF EXISTS testtb");
     let _ = local_testtb.db.execute("DELETE FROM synclog WHERE tbname='testtb'");
-    let _ = local_testtb.db.execute(database::datastate::TESTTB_CREATE_SQL);
+    let _ = local_testtb.db.execute(datastate::datastate::TESTTB_CREATE_SQL);
     println!("本地数据库: 已重建testtb表");
     
     // 启动服务器（服务器端使用远程数据库路径）

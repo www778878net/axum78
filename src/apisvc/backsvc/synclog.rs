@@ -15,8 +15,8 @@ use axum::{
     http::StatusCode,
 };
 use base::{UpInfo, Response};
-use database::LocalDB;
-use database::datastate::DataState;
+use datastate::LocalDB;
+use datastate::datastate::DataState;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -122,7 +122,7 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
 
     let mut batches = 0;
     for item in batch.items {
-        let id = if item.id.is_empty() { database::next_id_string() } else { item.id.clone() };
+        let id = if item.id.is_empty() { datastate::next_id_string() } else { item.id.clone() };
 
         let sql = "INSERT INTO synclog (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, cmdtextmd5, cid, upby) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)";
 

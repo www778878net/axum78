@@ -10,7 +10,7 @@ use axum::{
     http::StatusCode,
 };
 use base::{UpInfo, Response, ProjectPath};
-use database::{Mysql78, MysqlConfig, MysqlUpInfo};
+use datastate::{Mysql78, MysqlConfig, MysqlUpInfo};
 use crate::VerifyResult;
 use prost::Message;
 use serde::{Deserialize, Serialize};

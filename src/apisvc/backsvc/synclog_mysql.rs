@@ -15,7 +15,7 @@ use axum::{
     http::StatusCode,
 };
 use base::{UpInfo, Response};
-use database::{Mysql78, MysqlConfig, MysqlUpInfo};
+use datastate::{Mysql78, MysqlConfig, MysqlUpInfo};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use crate::VerifyResult;
@@ -210,7 +210,7 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str
 
     for item in batch.items {
         let id = if item.id.is_empty() { 
-            database::next_id_string() 
+            datastate::next_id_string() 
         } else { 
             item.id.clone() 
         };
@@ -315,7 +315,7 @@ fn validate_cid_uid(
     // update/delete 时查表验证
     if (item.action == "update" || item.action == "delete") && !item.idrow.is_empty() {
         let sql = format!("SELECT `cid`, `uid` FROM `{}` WHERE id = ? LIMIT 1", item.tbname);
-        let up = database::MysqlUpInfo::new();
+        let up = datastate::MysqlUpInfo::new();
         let rows = mysql.do_get(&sql, vec![Value::String(item.idrow.clone())], &up);
         
         match rows {
@@ -354,7 +354,7 @@ fn execute_synclog_item(
     _now: &str,
 ) -> Result<(), String> {
     let mut params: Vec<Value> = serde_json::from_str(&item.params).unwrap_or_default();
-    let up = database::MysqlUpInfo::new();
+    let up = datastate::MysqlUpInfo::new();
 
     match item.action.as_str() {
         "insert" => {
@@ -426,7 +426,7 @@ fn insert_synclog(
         Value::String(uptime.to_string()),
     ];
 
-    let up = database::MysqlUpInfo::new();
+    let up = datastate::MysqlUpInfo::new();
     let result = mysql.do_m_add(sql, params, &up);
     match result {
         Ok(r) if r.error.is_none() => Ok(()),
@@ -452,7 +452,7 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
         Value::Number(limit.into()),
     ];
 
-    let up_info = database::MysqlUpInfo::new();
+    let up_info = datastate::MysqlUpInfo::new();
     let rows = match mysql.do_get(sql, params, &up_info) {
         Ok(r) => r,
         Err(e) => {
@@ -557,7 +557,7 @@ fn ensure_synclog_table(mysql: &Mysql78) -> Result<(), String> {
         INDEX idx_cid_worker (cid, worker)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#;
 
-    let up = database::MysqlUpInfo::new();
+    let up = datastate::MysqlUpInfo::new();
     mysql.do_m(sql, vec![], &up)
         .map(|_| ())
         .map_err(|e| format!("创建synclog表失败: {}", e))

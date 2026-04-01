@@ -39,7 +39,4 @@ pub use base::Response;
 pub use apiopen::wework::get_wework_config;
 
 // Re-export database types for convenience
-pub use database::{Mysql78, MysqlConfig, MysqlUpInfo, next_id_string};
-
-pub mod daily_quiz;
-pub use daily_quiz::*;
+pub use datastate::{Mysql78, MysqlConfig, MysqlUpInfo, next_id_string};

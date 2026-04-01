@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::{UpInfo as ApiUpInfo, ApiError};
-use database::Sqlite78;
+use datastate::Sqlite78;
 use base::UpInfo;
 
 /// 表配置
@@ -239,5 +239,57 @@ pub trait BaseApi: Send + Sync + 'static {
             .map_err(|e| ApiError::new(&e, -3))?;
 
         Ok(result.affected_rows > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_config_new() {
+        let config = TableConfig {
+            tbname: "test_table".to_string(),
+            id_field: "id".to_string(),
+            idpk_field: "idpk".to_string(),
+            uidcid: "cid".to_string(),
+            cols: vec!["name".to_string(), "value".to_string()],
+        };
+
+        assert_eq!(config.tbname, "test_table");
+        assert_eq!(config.id_field, "id");
+        assert_eq!(config.idpk_field, "idpk");
+        assert_eq!(config.uidcid, "cid");
+        assert_eq!(config.cols.len(), 2);
+    }
+
+    #[test]
+    fn test_table_config_default_fields() {
+        let config = TableConfig {
+            tbname: "test_table".to_string(),
+            id_field: "id".to_string(),
+            idpk_field: "idpk".to_string(),
+            uidcid: "cid".to_string(),
+            cols: vec![],
+        };
+
+        // 验证默认字段值
+        assert_eq!(config.id_field, "id");
+        assert_eq!(config.idpk_field, "idpk");
+    }
+
+    #[test]
+    fn test_api_error_new() {
+        let error = ApiError::new("测试错误", -1);
+        assert_eq!(error.code, -1);
+        assert_eq!(error.message, "测试错误");
+    }
+
+    #[test]
+    fn test_api_error_display() {
+        let error = ApiError::new("测试错误", -1);
+        let display = format!("{}", error);
+        assert!(display.contains("-1"));
+        assert!(display.contains("测试错误"));
     }
 }
