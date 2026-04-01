@@ -16,6 +16,7 @@ use axum::{
 };
 use base::{UpInfo, Response};
 use database::LocalDB;
+use database::datastate::DataState;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -67,7 +68,7 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
         }
     };
-    
+
     match apifun.to_lowercase().as_str() {
         "maddmany" => m_add_many(&up, &db).await,
         "dowork" => do_work(&db).await,
@@ -122,9 +123,9 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     let mut batches = 0;
     for item in batch.items {
         let id = if item.id.is_empty() { database::next_id_string() } else { item.id.clone() };
-        
+
         let sql = "INSERT INTO synclog (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, cmdtextmd5, cid, upby) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)";
-        
+
         let _ = db.execute_with_params(
             sql,
             &[
@@ -152,7 +153,6 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
 
 async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
     ensure_synclog_table(db);
-    ensure_testtb_table(db);
 
     // 先检查synclog表中有多少条记录
     let count_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog", &[]) {
@@ -163,7 +163,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
         }
     };
     let total_count = count_rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()).unwrap_or(0);
-    
+
     // 检查synced=0的记录数
     let pending_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog WHERE synced = 0", &[]) {
         Ok(r) => r,
@@ -173,7 +173,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
         }
     };
     let pending_count = pending_rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()).unwrap_or(0);
-    
+
     println!("[doWork] synclog表总记录: {}, 待处理: {}", total_count, pending_count);
 
     let limit = 100;
@@ -214,13 +214,14 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
                     _ => "[]".to_string(),
                 }
             };
+            let cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let upby = row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let synclog_uptime = row.get("uptime").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
             println!("[doWork] 处理记录: idpk={}, tbname={}, action={}, idrow={}", idpk, tbname, action, idrow);
 
-            let result = process_synclog_item(db, &upby, &tbname, &action, &params_str, &idrow, &synclog_uptime);
+            let result = process_synclog_item(db, &upby, &tbname, &action, &params_str, &idrow, &synclog_uptime, &cmdtext);
             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
             match result {
@@ -337,127 +338,105 @@ fn ensure_synclog_table(db: &LocalDB) {
     let _ = db.execute(sql);
 }
 
-fn ensure_testtb_table(db: &LocalDB) {
-    let sql = r#"CREATE TABLE IF NOT EXISTS testtb (
-        idpk INTEGER PRIMARY KEY AUTOINCREMENT,
-        id TEXT NOT NULL UNIQUE,
-        cid TEXT NOT NULL DEFAULT '',
-        kind TEXT NOT NULL DEFAULT '',
-        item TEXT NOT NULL DEFAULT '',
-        data TEXT NOT NULL DEFAULT '',
-        upby TEXT NOT NULL DEFAULT '',
-        uptime TEXT NOT NULL DEFAULT ''
-    )"#;
-    let _ = db.execute(sql);
+/// 从 cmdtext 解析列名
+/// INSERT: INSERT INTO `table` (`col1`, `col2`) VALUES (?, ?)
+/// UPDATE: UPDATE `table` SET `col1` = ?, `col2` = ? WHERE `id` = ?
+fn parse_columns_from_cmdtext(cmdtext: &str, action: &str) -> Result<Vec<String>, String> {
+    let mut columns = Vec::new();
+
+    match action {
+        "insert" => {
+            // INSERT INTO `table` (`col1`, `col2`) VALUES (?, ?)
+            if let Some(start) = cmdtext.find('(') {
+                if let Some(end) = cmdtext.find(')') {
+                    let cols_part = &cmdtext[start + 1..end];
+                    for col in cols_part.split(',') {
+                        let col = col.trim();
+                        // 提取反引号中的列名
+                        if col.starts_with('`') && col.ends_with('`') {
+                            columns.push(col[1..col.len()-1].to_string());
+                        }
+                    }
+                }
+            }
+        }
+        "update" => {
+            // UPDATE `table` SET `col1` = ?, `col2` = ? WHERE `id` = ?
+            if let Some(set_start) = cmdtext.find("SET ") {
+                let set_end = cmdtext.find(" WHERE").unwrap_or(cmdtext.len());
+                let set_clause = &cmdtext[set_start + 4..set_end];
+
+                for part in set_clause.split(',') {
+                    let part = part.trim();
+                    // 格式：`col` = ?
+                    if let Some(start) = part.find('`') {
+                        if let Some(end) = part[start + 1..].find('`') {
+                            columns.push(part[start + 1..start + 1 + end].to_string());
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    if columns.is_empty() && action != "delete" {
+        return Err(format!("无法从 cmdtext 解析列名: {}", cmdtext));
+    }
+
+    Ok(columns)
+}
+
+/// 将 params 数组和列名转换为 HashMap
+fn build_record_from_params(columns: &[String], params: Vec<Value>) -> std::collections::HashMap<String, Value> {
+    let mut record = std::collections::HashMap::new();
+    for (i, col) in columns.iter().enumerate() {
+        if i < params.len() {
+            record.insert(col.clone(), params[i].clone());
+        }
+    }
+    record
 }
 
 fn process_synclog_item(
     db: &LocalDB,
-    upby: &str,
+    _upby: &str,
     tbname: &str,
     action: &str,
     params_str: &str,
     idrow: &str,
-    synclog_uptime: &str,
+    _synclog_uptime: &str,
+    cmdtext: &str,
 ) -> Result<(), String> {
-    let params: Vec<Value> = serde_json::from_str(params_str).unwrap_or_default();
+    // 使用 DataState 通用方法处理所有表
+    let datastate = DataState::with_db(tbname, db.clone());
 
     match action {
         "insert" => {
-            if tbname != "testtb" {
-                return Err(format!("不支持的表: {}", tbname));
-            }
-            
-            // params格式可能是：
-            // 1. [id, cid, kind, item, data] - 测试代码格式
-            // 2. [cid, data, id, item, kind, upby, uptime] - DataSync格式（按字段名字母顺序）
-            
-            // 尝试检测格式：如果第一个元素是雪花ID（纯数字），则是测试代码格式
-            let first_param = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
-            let is_test_format = first_param.chars().all(|c| c.is_ascii_digit());
-            
-            let (id, cid, kind, item, data) = if is_test_format && params.len() >= 5 {
-                // 测试代码格式: [id, cid, kind, item, data]
-                (
-                    params.get(0).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(1).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(2).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(3).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(4).and_then(|v| v.as_str()).unwrap_or(""),
-                )
-            } else if params.len() >= 5 {
-                // DataSync格式: [cid, data, id, item, kind, upby?, uptime?]
-                (
-                    params.get(2).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(0).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(4).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(3).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(1).and_then(|v| v.as_str()).unwrap_or(""),
-                )
-            } else {
-                return Err(format!("params格式错误: {}", params_str));
-            };
-
-            let new_id = if id.is_empty() { database::next_id_string() } else { id.to_string() };
-
-            // 优先使用synclog中的uptime，否则使用当前时间
-            let uptime = if !synclog_uptime.is_empty() {
-                synclog_uptime.to_string()
-            } else {
-                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
-            };
-
-            db.execute_with_params(
-                "INSERT OR REPLACE INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                &[&new_id as &dyn rusqlite::ToSql, &cid, &kind, &item, &data, &upby, &uptime],
-            ).map_err(|e| e)
+            let columns = parse_columns_from_cmdtext(cmdtext, action)?;
+            let params: Vec<Value> = serde_json::from_str(params_str).unwrap_or_default();
+            let record = build_record_from_params(&columns, params);
+            datastate.datasync.m_sync_save(&record)
+                .map(|_| ())
+                .map_err(|e| e)
         }
         "update" => {
-            if tbname != "testtb" {
-                return Err(format!("不支持的表: {}", tbname));
-            }
-            
-            // params格式可能是：
-            // 1. [kind, item, data, id] - 测试代码格式
-            // 2. [cid, data, id, item, kind, upby, uptime] - DataSync格式（按字段名字母顺序）
-            
-            let last_param = params.last().and_then(|v| v.as_str()).unwrap_or("");
-            let is_test_format = last_param.chars().all(|c| c.is_ascii_digit());
-            
-            let (id, kind, item, data) = if is_test_format && params.len() >= 4 {
-                // 测试代码格式: [kind, item, data, id]
-                (
-                    params.get(3).and_then(|v| v.as_str()).unwrap_or(idrow),
-                    params.get(0).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(1).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(2).and_then(|v| v.as_str()).unwrap_or(""),
-                )
-            } else if params.len() >= 5 {
-                // DataSync格式: [cid, data, id, item, kind, upby?, uptime?]
-                (
-                    params.get(2).and_then(|v| v.as_str()).unwrap_or(idrow),
-                    params.get(4).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(3).and_then(|v| v.as_str()).unwrap_or(""),
-                    params.get(1).and_then(|v| v.as_str()).unwrap_or(""),
-                )
-            } else {
-                return Err(format!("params格式错误: {}", params_str));
-            };
-            let record_uptime = if !synclog_uptime.is_empty() { synclog_uptime.to_string() } else { chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string() };
-
-            db.execute_with_params(
-                "UPDATE testtb SET kind = ?, item = ?, data = ?, upby = ?, uptime = ? WHERE id = ?",
-                &[&kind as &dyn rusqlite::ToSql, &item, &data, &upby, &record_uptime, &id],
-            ).map_err(|e| e)
+            let columns = parse_columns_from_cmdtext(cmdtext, action)?;
+            let params: Vec<Value> = serde_json::from_str(params_str).unwrap_or_default();
+            let record = build_record_from_params(&columns, params);
+            // UPDATE 的 params 最后一个是 id (WHERE 条件)
+            let id = record.get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(idrow)
+                .to_string();
+            datastate.datasync.m_sync_update(&id, &record)
+                .map(|_| ())
+                .map_err(|e| e)
         }
         "delete" => {
-            if tbname != "testtb" {
-                return Err(format!("不支持的表: {}", tbname));
-            }
-            db.execute_with_params(
-                "DELETE FROM testtb WHERE id = ?",
-                &[&idrow as &dyn rusqlite::ToSql],
-            ).map_err(|e| e)
+            datastate.datasync.m_sync_del(idrow)
+                .map(|_| ())
+                .map_err(|e| e)
         }
         _ => Err(format!("未知的action: {}", action)),
     }
