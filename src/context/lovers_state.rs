@@ -335,9 +335,11 @@ impl LoversDataStateMysql {
             // 用户已存在，更新 SID
             let user = &rows[0];
 
-            // id 可能是字符串或数字类型（MySQL 驱动可能将数字字符串解析为 Int）
-            let user_id = user.get("id")
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
+            // 使用 idpk 字段（数字类型）作为关联键
+            let user_id = user.get("idpk")
+                .and_then(|v| v.as_i64().map(|n| n.to_string()))
+                .or_else(|| user.get("idpk").and_then(|v| v.as_u64().map(|n| n.to_string())))
+                .or_else(|| user.get("id").and_then(|v| v.as_str().map(|s| s.to_string())))
                 .or_else(|| user.get("id").and_then(|v| v.as_i64().map(|n| n.to_string())))
                 .or_else(|| user.get("id").and_then(|v| v.as_u64().map(|n| n.to_string())))
                 .unwrap_or_default();
