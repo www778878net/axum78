@@ -360,10 +360,10 @@ impl LoversDataStateMysql {
 
             // 获取用户完整信息
             let user_query = r#"
-                SELECT l.id, l.uname, l.idcodef, l.cid, l.truename, l.mobile, la.sid
+                SELECT l.id, l.idpk, l.uname, l.idcodef, l.cid, l.truename, l.mobile, la.sid
                 FROM lovers l
-                JOIN lovers_auth la ON l.id = la.ikuser
-                WHERE l.id = ?
+                JOIN lovers_auth la ON l.idpk = la.ikuser
+                WHERE l.idpk = ?
             "#;
 
             let user_rows = self.mysql.do_get(user_query, vec![Value::String(user_id.to_string())], &up)
@@ -371,15 +371,18 @@ impl LoversDataStateMysql {
 
             if !user_rows.is_empty() {
                 let row = &user_rows[0];
-                // id 可能是字符串或数字类型
+                // 使用 idpk 作为主键
+                let idpk = row.get("idpk")
+                    .and_then(|v| v.as_i64())
+                    .or_else(|| row.get("idpk").and_then(|v| v.as_u64().map(|n| n as i64)))
+                    .unwrap_or(0);
+                
                 let user_id_from_row = row.get("id")
                     .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    .or_else(|| row.get("id").and_then(|v| v.as_i64().map(|n| n.to_string())))
-                    .or_else(|| row.get("id").and_then(|v| v.as_u64().map(|n| n.to_string())))
                     .unwrap_or_default();
 
                 return Ok(UserInfo {
-                    idpk: 0,
+                    idpk,
                     id: user_id_from_row,
                     uname: row.get("uname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                     truename: row.get("truename").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -451,8 +454,28 @@ impl LoversDataStateMysql {
             Value::String(now.clone()),
         ];
 
-        self.mysql.do_m_add(lovers_insert, lovers_values, &up)
+        // 执行插入并获取自动生成的 idpk
+        let insert_result = self.mysql.do_m_add(lovers_insert, lovers_values, &up)
             .map_err(|e| format!("创建用户失败: {}", e))?;
+        
+        // 获取新插入用户的 idpk
+        let idpk = match insert_result.last_insert_id {
+            Some(id) => id as i64,
+            None => {
+                // 如果无法获取 last_insert_id，查询获取
+                let query = "SELECT idpk FROM lovers WHERE id = ?";
+                let rows = self.mysql.do_get(query, vec![Value::String(user_id.clone())], &up)
+                    .map_err(|e| format!("获取用户 idpk 失败: {}", e))?;
+                
+                if !rows.is_empty() {
+                    rows[0].get("idpk").and_then(|v| v.as_i64())
+                        .or_else(|| rows[0].get("idpk").and_then(|v| v.as_u64().map(|n| n as i64)))
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            }
+        };
 
         // 插入 lovers_auth 表
         let auth_id = next_id_string();
@@ -462,7 +485,7 @@ impl LoversDataStateMysql {
         "#;
         let auth_values = vec![
             Value::String(auth_id),
-            Value::String(user_id.clone()),
+            Value::String(idpk.to_string()),
             Value::String(sid.clone()),
             Value::String(sid.clone()),
             Value::String(now.clone()),
@@ -473,10 +496,10 @@ impl LoversDataStateMysql {
         self.mysql.do_m_add(auth_insert, auth_values, &up)
             .map_err(|e| format!("创建认证记录失败: {}", e))?;
 
-        tracing::info!("创建新用户: user_id={}, uname={}", user_id, uname);
+        tracing::info!("创建新用户: user_id={}, idpk={}, uname={}", user_id, idpk, uname);
 
         Ok(UserInfo {
-            idpk: 0,
+            idpk,
             id: user_id,
             uname,
             truename: wechat_userid.to_string(),
