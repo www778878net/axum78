@@ -459,10 +459,10 @@ impl LoversDataStateMysql {
             .map_err(|e| format!("创建用户失败: {}", e))?;
         
         // 获取新插入用户的 idpk
-        let idpk = match insert_result.last_insert_id {
+        let idpk = match insert_result.insert_id {
             Some(id) => id as i64,
             None => {
-                // 如果无法获取 last_insert_id，查询获取
+                // 如果无法获取 insert_id，查询获取
                 let query = "SELECT idpk FROM lovers WHERE id = ?";
                 let rows = self.mysql.do_get(query, vec![Value::String(user_id.clone())], &up)
                     .map_err(|e| format!("获取用户 idpk 失败: {}", e))?;
