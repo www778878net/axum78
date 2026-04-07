@@ -385,7 +385,7 @@ impl LoversDataStateMysql {
                 
                 let user_id_from_row = row.get("id")
                     .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| idpk.to_string());
 
                 return Ok(UserInfo {
                     idpk,
