@@ -459,21 +459,20 @@ impl LoversDataStateMysql {
             .map_err(|e| format!("创建用户失败: {}", e))?;
         
         // 获取新插入用户的 idpk
-        let idpk = match insert_result.insert_id {
-            Some(id) => id as i64,
-            None => {
-                // 如果无法获取 insert_id，查询获取
-                let query = "SELECT idpk FROM lovers WHERE id = ?";
-                let rows = self.mysql.do_get(query, vec![Value::String(user_id.clone())], &up)
-                    .map_err(|e| format!("获取用户 idpk 失败: {}", e))?;
-                
-                if !rows.is_empty() {
-                    rows[0].get("idpk").and_then(|v| v.as_i64())
-                        .or_else(|| rows[0].get("idpk").and_then(|v| v.as_u64().map(|n| n as i64)))
-                        .unwrap_or(0)
-                } else {
-                    0
-                }
+        let idpk = if insert_result.insert_id > 0 {
+            insert_result.insert_id as i64
+        } else {
+            // 如果无法获取 insert_id，查询获取
+            let query = "SELECT idpk FROM lovers WHERE id = ?";
+            let rows = self.mysql.do_get(query, vec![Value::String(user_id.clone())], &up)
+                .map_err(|e| format!("获取用户 idpk 失败: {}", e))?;
+            
+            if !rows.is_empty() {
+                rows[0].get("idpk").and_then(|v| v.as_i64())
+                    .or_else(|| rows[0].get("idpk").and_then(|v| v.as_u64().map(|n| n as i64)))
+                    .unwrap_or(0)
+            } else {
+                0
             }
         };
 
