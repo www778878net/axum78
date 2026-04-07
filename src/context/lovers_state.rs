@@ -311,7 +311,7 @@ impl LoversDataStateMysql {
     ///
     /// # 表结构说明
     /// - lovers: id (主键), uname, idcodef (公司ID), cid, truename, mobile
-    /// - lovers_auth: id, iduser (关联 lovers.id), sid, sid_web
+    /// - lovers_auth: id, ikuser (关联 lovers.id), sid, sid_web
     pub fn find_or_create_user(
         &self,
         wechat_userid: &str,
@@ -348,8 +348,8 @@ impl LoversDataStateMysql {
                 return Err("用户 ID 为空".to_string());
             }
 
-            // 更新 lovers_auth 表的 sid (使用 iduser 关联)
-            let update_sid = "UPDATE lovers_auth SET sid = ?, uptime = ? WHERE iduser = ?";
+            // 更新 lovers_auth 表的 sid (使用 ikuser 关联)
+            let update_sid = "UPDATE lovers_auth SET sid = ?, uptime = ? WHERE ikuser = ?";
             self.mysql.do_m(update_sid, vec![
                 Value::String(sid.clone()),
                 Value::String(now.clone()),
@@ -360,7 +360,7 @@ impl LoversDataStateMysql {
             let user_query = r#"
                 SELECT l.id, l.uname, l.idcodef, l.cid, l.truename, l.mobile, la.sid
                 FROM lovers l
-                JOIN lovers_auth la ON l.id = la.iduser
+                JOIN lovers_auth la ON l.id = la.ikuser
                 WHERE l.id = ?
             "#;
 
@@ -395,7 +395,7 @@ impl LoversDataStateMysql {
                 // 没有 auth 记录，创建一个
                 let auth_id = next_id_string();
                 let auth_insert = r#"
-                    INSERT INTO lovers_auth (id, iduser, sid, sid_web, sid_web_date, upby, uptime, uid)
+                    INSERT INTO lovers_auth (id, ikuser, sid, sid_web, sid_web_date, upby, uptime, uid)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 "#;
                 self.mysql.do_m_add(auth_insert, vec![
@@ -455,7 +455,7 @@ impl LoversDataStateMysql {
         // 插入 lovers_auth 表
         let auth_id = next_id_string();
         let auth_insert = r#"
-            INSERT INTO lovers_auth (id, iduser, sid, sid_web, sid_web_date, upby, uptime, uid)
+            INSERT INTO lovers_auth (id, ikuser, sid, sid_web, sid_web_date, upby, uptime, uid)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         "#;
         let auth_values = vec![
