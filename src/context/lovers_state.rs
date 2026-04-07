@@ -257,9 +257,15 @@ fn get_mysql_config() -> MysqlConfig {
             .ok()
             .or_else(|| mysql_section.and_then(|s| s.get("database").cloned()))
             .unwrap_or_else(|| "testdb".to_string()),
-        max_connections: 10,
-        is_log: false,
-        is_count: false,
+        max_connections: mysql_section
+            .and_then(|s| s.get("max_connections").and_then(|v| v.parse().ok()))
+            .unwrap_or(10),
+        is_log: mysql_section
+            .and_then(|s| s.get("is_log").and_then(|v| v.parse().ok()))
+            .unwrap_or(false),
+        is_count: mysql_section
+            .and_then(|s| s.get("is_count").and_then(|v| v.parse().ok()))
+            .unwrap_or(false),
     }
 }
 
@@ -400,8 +406,8 @@ impl LoversDataStateMysql {
                 // 没有 auth 记录，创建一个
                 let auth_id = next_id_string();
                 let auth_insert = r#"
-                    INSERT INTO lovers_auth (id, ikuser, sid, sid_web, sid_web_date, upby, uptime, uid)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO lovers_auth (id, ikuser, sid, sid_web, sid_web_date, upby, uptime, uid, pwd)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#;
                 self.mysql.do_m_add(auth_insert, vec![
                     Value::String(auth_id),
@@ -412,6 +418,7 @@ impl LoversDataStateMysql {
                     Value::String(uname.clone()),
                     Value::String(now.clone()),
                     Value::String(sid.clone()),
+                    Value::String(String::new()),
                 ], &up).map_err(|e| format!("创建认证记录失败: {}", e))?;
 
                 return Ok(UserInfo {
@@ -479,8 +486,8 @@ impl LoversDataStateMysql {
         // 插入 lovers_auth 表
         let auth_id = next_id_string();
         let auth_insert = r#"
-            INSERT INTO lovers_auth (id, ikuser, sid, sid_web, sid_web_date, upby, uptime, uid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO lovers_auth (id, ikuser, sid, sid_web, sid_web_date, upby, uptime, uid, pwd)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#;
         let auth_values = vec![
             Value::String(auth_id),
@@ -491,6 +498,7 @@ impl LoversDataStateMysql {
             Value::String(uname.clone()),
             Value::String(now.clone()),
             Value::String(sid.clone()),
+            Value::String(String::new()),
         ];
         self.mysql.do_m_add(auth_insert, auth_values, &up)
             .map_err(|e| format!("创建认证记录失败: {}", e))?;
