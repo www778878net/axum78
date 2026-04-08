@@ -403,39 +403,70 @@ impl LoversDataStateMysql {
                     is_new: false,
                 });
             } else {
-                // 没有 auth 记录，创建一个
-                let auth_id = next_id_string();
-                let auth_insert = r#"
-                    INSERT INTO lovers_auth (id, ikuser, sid, sid_web, sid_web_date, upby, uptime, uid, pwd)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                "#;
-                self.mysql.do_m_add(auth_insert, vec![
-                    Value::String(auth_id),
-                    Value::String(user_id.to_string()),
-                    Value::String(sid.clone()),
-                    Value::String(sid.clone()),
-                    Value::String(now.clone()),
-                    Value::String(uname.clone()),
-                    Value::String(now.clone()),
-                    Value::String(sid.clone()),
-                    Value::String(String::new()),
-                ], &up).map_err(|e| format!("创建认证记录失败: {}", e))?;
+                // 没有 auth 记录，检查是否已存在 ikuser 记录
+                let check_auth = "SELECT * FROM lovers_auth WHERE ikuser = ?";
+                let auth_rows = self.mysql.do_get(check_auth, vec![Value::String(user_id.to_string())], &up)
+                    .map_err(|e| format!("检查认证记录失败: {}", e))?;
 
-                return Ok(UserInfo {
-                    idpk: 0,
-                    id: user_id.to_string(),
-                    uname: uname.clone(),
-                    truename: wechat_userid.to_string(),
-                    idcodef: user.get("idcodef").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    coname: String::new(),
-                    mobile: String::new(),
-                    sid,
-                    money78: 0,
-                    consume: 0,
-                    wechat_userid: wechat_userid.to_string(),
-                    user_type: user_type.to_string(),
-                    is_new: false,
-                });
+                if !auth_rows.is_empty() {
+                    // 已存在认证记录，更新 SID
+                    let update_sid = "UPDATE lovers_auth SET sid = ?, uptime = ? WHERE ikuser = ?";
+                    self.mysql.do_m(update_sid, vec![
+                        Value::String(sid.clone()),
+                        Value::String(now.clone()),
+                        Value::String(user_id.to_string()),
+                    ], &up).map_err(|e| format!("更新SID失败: {}", e))?;
+
+                    return Ok(UserInfo {
+                        idpk: 0,
+                        id: user_id.to_string(),
+                        uname: uname.clone(),
+                        truename: wechat_userid.to_string(),
+                        idcodef: user.get("idcodef").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        coname: String::new(),
+                        mobile: String::new(),
+                        sid,
+                        money78: 0,
+                        consume: 0,
+                        wechat_userid: wechat_userid.to_string(),
+                        user_type: user_type.to_string(),
+                        is_new: false,
+                    });
+                } else {
+                    // 创建新的认证记录
+                    let auth_id = next_id_string();
+                    let auth_insert = r#"
+                        INSERT INTO lovers_auth (id, ikuser, sid, sid_web, sid_web_date, upby, uptime, uid, pwd)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    "#;
+                    self.mysql.do_m_add(auth_insert, vec![
+                        Value::String(auth_id),
+                        Value::String(user_id.to_string()),
+                        Value::String(sid.clone()),
+                        Value::String(sid.clone()),
+                        Value::String(now.clone()),
+                        Value::String(uname.clone()),
+                        Value::String(now.clone()),
+                        Value::String(sid.clone()),
+                        Value::String(String::new()),
+                    ], &up).map_err(|e| format!("创建认证记录失败: {}", e))?;
+
+                    return Ok(UserInfo {
+                        idpk: 0,
+                        id: user_id.to_string(),
+                        uname: uname.clone(),
+                        truename: wechat_userid.to_string(),
+                        idcodef: user.get("idcodef").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        coname: String::new(),
+                        mobile: String::new(),
+                        sid,
+                        money78: 0,
+                        consume: 0,
+                        wechat_userid: wechat_userid.to_string(),
+                        user_type: user_type.to_string(),
+                        is_new: false,
+                    });
+                }
             }
         }
 

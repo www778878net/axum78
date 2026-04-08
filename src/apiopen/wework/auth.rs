@@ -38,14 +38,14 @@ pub fn get_wework_config() -> &'static WeWorkConfig {
         // 直接硬编码配置，确保能够正确加载
         WeWorkConfig {
             corp_id: "ww3ef0a56dd553c560".to_string(),
-            corp_secret: "xP4fUChzF8FuAyCKwHOdtdzUgfRx7M8hMVie5IodihU".to_string(),
-            agent_id: "1000002".to_string(),
+            corp_secret: "y5XDM8MI4Jh3bYLKlqABv9TcpD743UlFjmk7YLJrOic".to_string(),
+            agent_id: "1000003".to_string(),
             admin_userid: "HuChengBo".to_string(),
             chatid_jhs: "wrtP6ZUQAA59rR35tlbfBDQewToLGIow".to_string(),
             chatid_admin: "HuChengBo".to_string(),
             default_to_user: "@all".to_string(),
-            token: "mytoken123".to_string(),
-            encoding_aes_key: String::new(),
+            token: "KsceAuDMlf6dE4HL9fnIVuy3G5LV".to_string(),
+            encoding_aes_key: "YZnoKhiEjD65bzXWHeBCngy1rAnzQMw6mWamesyQBnT".to_string(),
             safe: 0,
             token_cache_seconds: 7200,
         }
