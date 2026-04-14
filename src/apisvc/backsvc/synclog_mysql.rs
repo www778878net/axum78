@@ -535,7 +535,8 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
 }
 
 /// 获取其他客户端的变更记录（过滤本地worker）
-/// 用于增量同步，避免下载本地产生的变更
+/// 使用idpk作为serverid，实现增量同步
+/// 配合5秒安全水位线策略，解决分布式系统时序问题
 async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, Bytes) {
     let limit = up.getnumber as i32;
 
@@ -546,18 +547,33 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
         String::new()
     };
 
+    // 获取客户端传递的最后serverid（idpk）
+    let last_server_id: i64 = up.data
+        .as_ref()
+        .and_then(|d| d.get("lastServerId"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
     // 确保表存在
     if let Err(e) = ensure_synclog_table(mysql) {
         let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
-    // 查询 synced=1（已同步到服务器）且 worker != 本地worker 的记录
-    let sql = "SELECT * FROM synclog WHERE synced = 1 AND cid = ? AND worker != ? ORDER BY idpk ASC LIMIT ?";
+    // 5秒安全水位线
+    let safe_interval_secs = 5;
+    let max_uptime = chrono::Local::now() - chrono::Duration::seconds(safe_interval_secs);
+    let max_uptime_str = max_uptime.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // 查询 synced=1 且 worker != 本地worker 且 idpk > lastServerId 且 uptime <= max_uptime 的记录
+    // 限制查询数量为limit * 2，因为还要过滤
+    let sql = "SELECT * FROM synclog WHERE synced = 1 AND cid = ? AND worker != ? AND idpk > ? AND uptime <= ? ORDER BY idpk ASC LIMIT ?";
     let params: Vec<Value> = vec![
         Value::String(expected_cid.to_string()),
         Value::String(expected_worker),
-        Value::Number(limit.into()),
+        Value::Number(last_server_id.into()),
+        Value::String(max_uptime_str),
+        Value::Number((limit * 2).into()),
     ];
 
     let up_info = datastate::MysqlUpInfo::new();
@@ -571,8 +587,13 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
 
     // 构建 SynclogItem，对于业务数据需要查询实际表内容
     let mut items: Vec<SynclogItem> = Vec::new();
+    let mut next_server_id = last_server_id;
 
     for row in rows {
+        if items.len() >= limit as usize {
+            break;
+        }
+
         let tbname = row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -614,6 +635,11 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
             cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
         }
 
+        // 更新next_server_id
+        if let Some(idpk) = row.get("idpk").and_then(|v| v.as_i64()) {
+            next_server_id = idpk;
+        }
+
         items.push(SynclogItem {
             id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             apisys: row.get("apisys").and_then(|v| v.as_str()).unwrap_or("v1").to_string(),
@@ -637,7 +663,10 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
     use base64::{Engine as _, engine::general_purpose};
     let bytedata_base64 = general_purpose::STANDARD.encode(&bytedata);
 
-    let resp = Response::success_json(&serde_json::json!({ "bytedata": bytedata_base64 }));
+    let resp = Response::success_json(&serde_json::json!({ 
+        "bytedata": bytedata_base64,
+        "nextServerId": next_server_id
+    }));
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
