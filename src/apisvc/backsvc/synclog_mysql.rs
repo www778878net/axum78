@@ -176,6 +176,7 @@ pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (
     match apifun.to_lowercase().as_str() {
         "maddmany" => m_add_many(&up, &mysql, &user_cid, &user_uid).await,
         "get" => get(&up, &mysql, &user_cid).await,
+        "getbyworker" => get_by_worker(&up, &mysql, &user_cid).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
@@ -449,6 +450,113 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
     let sql = "SELECT * FROM synclog WHERE synced = 1 AND cid = ? ORDER BY idpk ASC LIMIT ?";
     let params: Vec<Value> = vec![
         Value::String(expected_cid.to_string()),
+        Value::Number(limit.into()),
+    ];
+
+    let up_info = datastate::MysqlUpInfo::new();
+    let rows = match mysql.do_get(sql, params, &up_info) {
+        Ok(r) => r,
+        Err(e) => {
+            let resp = Response::fail(&format!("查询失败: {}", e), -1);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+        }
+    };
+
+    // 构建 SynclogItem，对于业务数据需要查询实际表内容
+    let mut items: Vec<SynclogItem> = Vec::new();
+
+    for row in rows {
+        let tbname = row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        // 默认 cmdtext 和 params
+        let mut cmdtext = String::new();
+        let params = "[]".to_string(); // 下载时不需要参数
+
+        // 如果需要获取业务数据（insert/update），查询业务表
+        if action == "insert" || action == "update" {
+            if !tbname.is_empty() && !idrow.is_empty() {
+                // 查询业务表最新数据
+                let business_sql = &format!("SELECT * FROM `{}` WHERE id = ?", tbname);
+                let mut business_params = Vec::new();
+                business_params.push(Value::String(idrow.clone()));
+
+                if let Ok(business_rows) = mysql.do_get(business_sql, business_params, &up_info) {
+                    if let Some(business_row) = business_rows.first() {
+                        // 将业务行转换为 JSON 存入 cmdtext
+                        if let Ok(json_str) = serde_json::to_string(business_row) {
+                            cmdtext = json_str;
+                        } else {
+                            cmdtext = "{}".to_string();
+                        }
+                    } else {
+                        cmdtext = "{}".to_string();
+                    }
+                } else {
+                    cmdtext = "{}".to_string();
+                }
+            } else {
+                cmdtext = "{}".to_string();
+            }
+        } else if action == "delete" {
+            // delete 操作不返回业务数据（已删除）
+            cmdtext = "{}".to_string();
+        } else {
+            // 未知操作，保持原有 cmdtext（兼容旧数据）
+            cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        }
+
+        items.push(SynclogItem {
+            id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            apisys: row.get("apisys").and_then(|v| v.as_str()).unwrap_or("v1").to_string(),
+            apimicro: row.get("apimicro").and_then(|v| v.as_str()).unwrap_or("iflow").to_string(),
+            apiobj: row.get("apiobj").and_then(|v| v.as_str()).unwrap_or("synclog").to_string(),
+            tbname,
+            action,
+            cmdtext,
+            params,
+            idrow,
+            worker: row.get("worker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            synced: row.get("synced").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            cmdtextmd5: row.get("cmdtextmd5").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            upby: row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        });
+    }
+
+    let batch = SynclogBatch { items };
+    let bytedata = batch.encode_to_vec();
+    use base64::{Engine as _, engine::general_purpose};
+    let bytedata_base64 = general_purpose::STANDARD.encode(&bytedata);
+
+    let resp = Response::success_json(&serde_json::json!({ "bytedata": bytedata_base64 }));
+    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+}
+
+/// 获取其他客户端的变更记录（过滤本地worker）
+/// 用于增量同步，避免下载本地产生的变更
+async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, Bytes) {
+    let limit = up.getnumber as i32;
+
+    // 从SID中提取worker（格式：cid|worker）
+    let expected_worker = if up.sid.contains('|') {
+        up.sid.split('|').nth(1).unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+
+    // 确保表存在
+    if let Err(e) = ensure_synclog_table(mysql) {
+        let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
+
+    // 查询 synced=1（已同步到服务器）且 worker != 本地worker 的记录
+    let sql = "SELECT * FROM synclog WHERE synced = 1 AND cid = ? AND worker != ? ORDER BY idpk ASC LIMIT ?";
+    let params: Vec<Value> = vec![
+        Value::String(expected_cid.to_string()),
+        Value::String(expected_worker),
         Value::Number(limit.into()),
     ];
 
