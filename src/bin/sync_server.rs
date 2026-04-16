@@ -10,11 +10,13 @@ use axum78::create_router;
 async fn main() {
     let app = create_router();
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:80").await.expect("绑定端口失败");
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.expect("绑定端口失败");
 
     tracing_subscriber::fmt::init();
 
-    tracing::info!("同步服务器启动: http://0.0.0.0:80");
+    tracing::info!("同步服务器启动: http://{}", addr);
     tracing::info!("端点:");
     tracing::info!("  POST /:apisys/:apimicro/:apiobj/:apifun - 4级路由API");
     tracing::info!("  POST /apisvc/backsvc/synclog/maddmany - 上传同步记录");

@@ -128,7 +128,7 @@ fn get_mysql_config() -> MysqlConfig {
         host: "127.0.0.1".to_string(),
         port: 3306,
         user: "root".to_string(),
-        password: String::new(),
+        password: "root123".to_string(),
         database: "testdb".to_string(),
         max_connections: 10,
         is_log: false,
@@ -360,17 +360,66 @@ fn execute_synclog_action(mysql: &Mysql78, action: &str, cmdtext: &str, params_s
 /// 解码批量数据
 fn decode_batch(up: &UpInfo) -> Result<SynclogBatch, String> {
     if let Some(data) = &up.bytedata {
-        SynclogBatch::decode(&**data)
-            .map_err(|e| format!("Protobuf解码失败: {}", e))
+        if data.len() >= 8 {
+            let first_byte = data[0];
+            let content = &data[8..];
+            match first_byte {
+                0 => {
+                    SynclogBatch::decode(content)
+                        .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
+                }
+                1 => {
+                    let json_str = String::from_utf8_lossy(content);
+                    let items: Vec<SynclogItem> = serde_json::from_str(&json_str)
+                        .map_err(|e| format!("[SYNCLOG_V2] JSON解码失败: {}", e))?;
+                    Ok(SynclogBatch { items })
+                }
+                _ => {
+                    SynclogBatch::decode(&**data)
+                        .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
+                }
+            }
+        } else {
+            SynclogBatch::decode(&**data)
+                .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
+        }
     } else if let Some(jsdata) = &up.jsdata {
-        use base64::{Engine as _, engine::general_purpose};
-        let bytes = general_purpose::STANDARD
-            .decode(jsdata)
-            .map_err(|e| format!("Base64解码失败: {}", e))?;
-        SynclogBatch::decode(&*bytes)
-            .map_err(|e| format!("Protobuf解码失败: {}", e))
+        if jsdata.len() >= 8 {
+            let first_char = jsdata.chars().next().unwrap_or(' ');
+            let content = &jsdata[8..];
+            match first_char {
+                '0' => {
+                    use base64::{Engine as _, engine::general_purpose};
+                    let bytes = general_purpose::STANDARD
+                        .decode(content)
+                        .map_err(|e| format!("[SYNCLOG_V2] Base64解码失败(0): {}", e))?;
+                    SynclogBatch::decode(&*bytes)
+                        .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
+                }
+                '1' => {
+                    let items: Vec<SynclogItem> = serde_json::from_str(content)
+                        .map_err(|e| format!("[SYNCLOG_V2] JSON解码失败(1): {}, content={}", e, &content[..content.len().min(100)]))?;
+                    Ok(SynclogBatch { items })
+                }
+                _ => {
+                    use base64::{Engine as _, engine::general_purpose};
+                    let bytes = general_purpose::STANDARD
+                        .decode(jsdata)
+                        .map_err(|e| format!("[SYNCLOG_V2] Base64解码失败(_): first_char='{}' ({}), jsdata={}", first_char, first_char as u32, &jsdata[..jsdata.len().min(50)]))?;
+                    SynclogBatch::decode(&*bytes)
+                        .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
+                }
+            }
+        } else {
+            use base64::{Engine as _, engine::general_purpose};
+            let bytes = general_purpose::STANDARD
+                .decode(jsdata)
+                .map_err(|e| format!("[SYNCLOG_V2] Base64解码失败(short): {}", e))?;
+            SynclogBatch::decode(&*bytes)
+                .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
+        }
     } else {
-        Err("无bytedata或jsdata".to_string())
+        Err("[SYNCLOG_V2] 无bytedata或jsdata".to_string())
     }
 }
 
