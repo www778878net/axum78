@@ -268,33 +268,31 @@ async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
 }
 
 async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
-    let expected_worker = if up.sid.contains('|') {
-        up.sid.split('|').nth(1).unwrap_or("").to_string()
-    } else {
-        let resp = Response::fail("SID格式错误，需要 cid|worker 格式", -1);
-        return (StatusCode::UNAUTHORIZED, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-    };
-
-    if expected_worker.is_empty() {
-        let resp = Response::fail("worker为空", -1);
-        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-    }
-
     ensure_synclog_table(db);
 
     let limit = up.getnumber as i32;
 
-    let last_server_id = if let Some(jsdata) = &up.jsdata {
+    let (worker, last_server_id) = if let Some(jsdata) = &up.jsdata {
         if let Ok(obj) = serde_json::from_str::<serde_json::Value>(jsdata) {
-            obj.get("lastServerId")
+            let worker = obj.get("worker")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let last_server_id = obj.get("lastServerId")
                 .and_then(|v| v.as_i64())
-                .unwrap_or(0) as i64
+                .unwrap_or(0);
+            (worker, last_server_id)
         } else {
-            0
+            (String::new(), 0)
         }
     } else {
-        0
+        (String::new(), 0)
     };
+
+    if worker.is_empty() {
+        let resp = Response::fail("worker参数为空", -1);
+        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
 
     let now = chrono::Utc::now().timestamp();
     let safe_time = now - 5;
@@ -305,7 +303,7 @@ async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
 
     let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
         "SELECT * FROM synclog WHERE synced = 1 AND worker != ? AND idpk > ? AND uptime <= ? ORDER BY idpk ASC LIMIT ?",
-        &[&expected_worker as &dyn rusqlite::ToSql, &last_server_id, &safe_datetime, &limit as &dyn rusqlite::ToSql],
+        &[&worker as &dyn rusqlite::ToSql, &last_server_id, &safe_datetime, &limit as &dyn rusqlite::ToSql],
     ) {
         Ok(r) => r,
         Err(e) => {

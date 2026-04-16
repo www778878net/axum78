@@ -639,34 +639,43 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
 /// 获取其他客户端的变更记录（过滤本地worker）
 /// 使用idpk作为serverid，实现增量同步
 /// 配合5秒安全水位线策略，解决分布式系统时序问题
-async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, Bytes) {
+async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, _expected_cid: &str) -> (StatusCode, Bytes) {
     let limit = up.getnumber as i32;
 
-    // 从SID中提取worker（格式：cid|worker）
-    let expected_worker = if up.sid.contains('|') {
-        up.sid.split('|').nth(1).unwrap_or("").to_string()
+    let (worker, last_server_id) = if let Some(jsdata) = &up.jsdata {
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(jsdata) {
+            let worker = obj.get("worker")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let last_server_id = obj.get("lastServerId")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            (worker, last_server_id)
+        } else {
+            (String::new(), 0)
+        }
     } else {
-        String::new()
+        (String::new(), 0)
     };
 
-    // 获取客户端传递的最后serverid（idpk）
-    let last_server_id: i64 = up.midpk;
+    if worker.is_empty() {
+        let resp = Response::fail("worker参数为空", -1);
+        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
 
-    // 确保表存在
     if let Err(e) = ensure_synclog_table(mysql) {
         let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
-    // 5秒安全水位线
     let safe_interval_secs = 5;
     let max_uptime = chrono::Local::now() - chrono::Duration::seconds(safe_interval_secs);
     let max_uptime_str = max_uptime.format("%Y-%m-%d %H:%M:%S").to_string();
 
-    // 查询 synced=1 且 worker != 本地worker 且 idpk > lastServerId 且 uptime <= max_uptime 的记录
     let sql = "SELECT * FROM synclog WHERE synced = 1 AND worker != ? AND idpk > ? AND uptime <= ? ORDER BY idpk ASC LIMIT ?";
     let params: Vec<Value> = vec![
-        Value::String(expected_worker),
+        Value::String(worker),
         Value::Number(last_server_id.into()),
         Value::String(max_uptime_str),
         Value::Number(limit.into()),
