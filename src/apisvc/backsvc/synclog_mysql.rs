@@ -245,18 +245,18 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, _user_uid: &st
 
 /// 执行待处理的 synclog 记录
 async fn do_work(up: &UpInfo, mysql: &Mysql78, _user_cid: &str) -> (StatusCode, Bytes) {
-    let worker = if let Some(jsdata) = &up.jsdata {
-        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(jsdata) {
-            obj.get("worker")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        } else {
-            String::new()
+    let data = match up.parse_prefixed_data() {
+        Ok(d) => d,
+        Err(_) => {
+            let resp = Response::fail("数据解析失败", -1);
+            return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
         }
-    } else {
-        String::new()
     };
+
+    let worker = data.get("worker")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     if worker.is_empty() {
         let resp = Response::fail("worker参数为空", -1);
@@ -642,22 +642,21 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
 async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, _expected_cid: &str) -> (StatusCode, Bytes) {
     let limit = up.getnumber as i32;
 
-    let (worker, last_server_id) = if let Some(jsdata) = &up.jsdata {
-        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(jsdata) {
-            let worker = obj.get("worker")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let last_server_id = obj.get("lastServerId")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            (worker, last_server_id)
-        } else {
-            (String::new(), 0)
+    let data = match up.parse_prefixed_data() {
+        Ok(d) => d,
+        Err(_) => {
+            let resp = Response::fail("数据解析失败", -1);
+            return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
         }
-    } else {
-        (String::new(), 0)
     };
+
+    let worker = data.get("worker")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let last_server_id = data.get("lastServerId")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
 
     if worker.is_empty() {
         let resp = Response::fail("worker参数为空", -1);
