@@ -71,7 +71,7 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
 
     match apifun.to_lowercase().as_str() {
         "maddmany" => m_add_many(&up, &db).await,
-        "dowork" => do_work(&db).await,
+        "dowork" => do_work(&up, &db).await,
         "get" => get(&up, &db).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
@@ -151,11 +151,28 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
-async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
+async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
+    let worker = if let Some(jsdata) = &up.jsdata {
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(jsdata) {
+            obj.get("worker")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    if worker.is_empty() {
+        let resp = Response::fail("worker参数为空", -1);
+        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
+
     ensure_synclog_table(db);
 
-    // 先检查synclog表中有多少条记录
-    let count_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog", &[]) {
+    let count_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog WHERE worker = ?", &[&worker as &dyn rusqlite::ToSql]) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询synclog表失败: {}", e), -1);
@@ -164,8 +181,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
     };
     let total_count = count_rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()).unwrap_or(0);
 
-    // 检查synced=0的记录数
-    let pending_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog WHERE synced = 0", &[]) {
+    let pending_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog WHERE synced = 0 AND worker = ?", &[&worker as &dyn rusqlite::ToSql]) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询pending记录失败: {}", e), -1);
@@ -174,7 +190,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
     };
     let pending_count = pending_rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()).unwrap_or(0);
 
-    println!("[doWork] synclog表总记录: {}, 待处理: {}", total_count, pending_count);
+    println!("[doWork] worker={}, synclog表总记录: {}, 待处理: {}", worker, total_count, pending_count);
 
     let limit = 100;
     let max_batches = 10;
@@ -183,8 +199,8 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
 
     for _ in 0..max_batches {
         let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
-            "SELECT * FROM synclog WHERE synced = 0 ORDER BY idpk ASC LIMIT ?",
-            &[&limit as &dyn rusqlite::ToSql],
+            "SELECT * FROM synclog WHERE synced = 0 AND worker = ? ORDER BY idpk ASC LIMIT ?",
+            &[&worker as &dyn rusqlite::ToSql, &limit as &dyn rusqlite::ToSql],
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -236,7 +252,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
                 Err(e) => {
                     println!("[doWork] 处理失败: idpk={}, error={}", idpk, e);
                     let _ = db.execute_with_params(
-                        "UPDATE synclog SET synced = 2, lasterrinfo = ?, uptime = ? WHERE idpk = ?",
+                        "UPDATE synclog SET synced = -1, lasterrinfo = ?, uptime = ? WHERE idpk = ?",
                         &[&e as &dyn rusqlite::ToSql, &now, &idpk],
                     );
                 }
@@ -252,25 +268,44 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
 }
 
 async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
-    let expected_cid = if up.sid.is_empty() {
-        String::new()
-    } else if up.sid.contains('|') {
-        up.sid.split('|').next().unwrap_or("").to_string()
-    } else {
-        up.sid.clone()
-    };
     let expected_worker = if up.sid.contains('|') {
         up.sid.split('|').nth(1).unwrap_or("").to_string()
     } else {
-        String::new()
+        let resp = Response::fail("SID格式错误，需要 cid|worker 格式", -1);
+        return (StatusCode::UNAUTHORIZED, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     };
+
+    if expected_worker.is_empty() {
+        let resp = Response::fail("worker为空", -1);
+        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
 
     ensure_synclog_table(db);
 
     let limit = up.getnumber as i32;
+
+    let last_server_id = if let Some(jsdata) = &up.jsdata {
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(jsdata) {
+            obj.get("lastServerId")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as i64
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let safe_time = now - 5;
+    let safe_datetime = chrono::DateTime::from_timestamp(safe_time, 0)
+        .unwrap_or_else(|| chrono::Utc::now())
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+
     let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
-        "SELECT * FROM synclog WHERE synced = 1 AND cid = ? AND worker != ? ORDER BY idpk ASC LIMIT ?",
-        &[&expected_cid as &dyn rusqlite::ToSql, &expected_worker, &limit],
+        "SELECT * FROM synclog WHERE synced = 1 AND worker != ? AND idpk > ? AND uptime <= ? ORDER BY idpk ASC LIMIT ?",
+        &[&expected_worker as &dyn rusqlite::ToSql, &last_server_id, &safe_datetime, &limit as &dyn rusqlite::ToSql],
     ) {
         Ok(r) => r,
         Err(e) => {

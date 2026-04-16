@@ -175,6 +175,7 @@ pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (
     
     match apifun.to_lowercase().as_str() {
         "maddmany" => m_add_many(&up, &mysql, &user_cid, &user_uid).await,
+        "dowork" => do_work(&up, &mysql, &user_cid).await,
         "get" => get(&up, &mysql, &user_cid).await,
         "getbyworker" => get_by_worker(&up, &mysql, &user_cid).await,
         _ => {
@@ -184,9 +185,8 @@ pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (
     }
 }
 
-/// 批量添加 synclog 并执行 SQL
-async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str) -> (StatusCode, Bytes) {
-    // 解码请求数据
+/// 批量添加 synclog（只保存，不执行 SQL）
+async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, _user_uid: &str) -> (StatusCode, Bytes) {
     let batch: SynclogBatch = match decode_batch(up) {
         Ok(b) => b,
         Err(e) => {
@@ -195,64 +195,166 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str
         }
     };
 
-    // 确保 synclog 表存在
     if let Err(e) = ensure_synclog_table(mysql) {
         let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
-    // 管理员帐套不需要验证
-    let admin_cid = "d4856531-e9d3-20f3-4c22-fe3c65fb009c";
-    let is_admin = user_cid == admin_cid;
-
-    let mut success_ids: Vec<String> = Vec::new();
-    let mut failed: Vec<FailedItem> = Vec::new();
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut batches = 0;
 
     for item in batch.items {
-        let id = if item.id.is_empty() { 
-            datastate::next_id_string() 
-        } else { 
-            item.id.clone() 
+        let id = if item.id.is_empty() {
+            datastate::next_id_string()
+        } else {
+            item.id.clone()
         };
 
-        // 权限验证（管理员跳过）
-        if !is_admin {
-            let validation = validate_cid_uid(mysql, &item, user_cid, user_uid);
-            if let Err(e) = validation {
-                failed.push(FailedItem {
-                    id: id.clone(),
-                    idrow: item.idrow.clone(),
-                    error: e,
-                });
-                continue;
+        let sql = r#"INSERT INTO synclog
+            (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, lasterrinfo, cmdtextmd5, cid, upby, uptime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?, ?)"#;
+
+        let params: Vec<Value> = vec![
+            Value::String(id),
+            Value::String(item.apisys),
+            Value::String(item.apimicro),
+            Value::String(item.apiobj),
+            Value::String(item.tbname),
+            Value::String(item.action),
+            Value::String(item.cmdtext),
+            Value::String(item.params),
+            Value::String(item.idrow),
+            Value::String(item.worker),
+            Value::String(item.cmdtextmd5),
+            Value::String(user_cid.to_string()),
+            Value::String(item.upby),
+            Value::String(now.clone()),
+        ];
+
+        let up_info = datastate::MysqlUpInfo::new();
+        if let Err(e) = mysql.do_m(sql, params, &up_info) {
+            eprintln!("[m_add_many] 插入失败: {}", e);
+        } else {
+            batches += 1;
+        }
+    }
+
+    let resp = Response::success_json(&serde_json::json!({ "batches": batches }));
+    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+}
+
+/// 执行待处理的 synclog 记录
+async fn do_work(up: &UpInfo, mysql: &Mysql78, _user_cid: &str) -> (StatusCode, Bytes) {
+    let worker = if let Some(jsdata) = &up.jsdata {
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(jsdata) {
+            obj.get("worker")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    if worker.is_empty() {
+        let resp = Response::fail("worker参数为空", -1);
+        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
+
+    if let Err(e) = ensure_synclog_table(mysql) {
+        let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
+
+    let limit = 100;
+    let max_batches = 10;
+    let mut total_processed = 0i32;
+    let mut batch_count = 0i32;
+
+    for _ in 0..max_batches {
+        let sql = "SELECT * FROM synclog WHERE synced = 0 AND worker = ? ORDER BY idpk ASC LIMIT ?";
+        let params: Vec<Value> = vec![
+            Value::String(worker.clone()),
+            Value::Number(limit.into()),
+        ];
+
+        let up_info = datastate::MysqlUpInfo::new();
+        let rows = match mysql.do_get(sql, params, &up_info) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[do_work] 查询失败: {}", e);
+                break;
             }
+        };
+
+        if rows.is_empty() {
+            break;
         }
 
-        // 执行 SQL
-        let exec_result = execute_synclog_item(mysql, &item, user_cid, &now);
-        
-        match exec_result {
-            Ok(_) => {
-                // 写入 synclog 成功记录
-                let _ = insert_synclog(mysql, &item, &id, user_cid, 1, "", &now, &up.uname);
-                success_ids.push(id);
-            }
-            Err(e) => {
-                // 写入 synclog 失败记录
-                let _ = insert_synclog(mysql, &item, &id, user_cid, -1, &e, &now, &up.uname);
-                failed.push(FailedItem {
-                    id: id.clone(),
-                    idrow: item.idrow.clone(),
-                    error: e,
-                });
+        batch_count += 1;
+        println!("[do_work] 批次 {} 处理 {} 条记录", batch_count, rows.len());
+
+        for row in rows {
+            let idpk = row.get("idpk").and_then(|v| v.as_i64()).unwrap_or(0);
+            let tbname = row.get("tbname").and_then(|v| v.as_str()).unwrap_or("");
+            let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let params_str = row.get("params").and_then(|v| v.as_str()).unwrap_or("[]");
+            let cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("");
+            let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("");
+            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+            let result = execute_synclog_action(mysql, action, cmdtext, params_str);
+
+            match result {
+                Ok(_) => {
+                    println!("[do_work] 处理成功: idpk={}", idpk);
+                    let update_sql = "UPDATE synclog SET synced = 1, lasterrinfo = '', uptime = ? WHERE idpk = ?";
+                    let update_params: Vec<Value> = vec![
+                        Value::String(now),
+                        Value::Number(idpk.into()),
+                    ];
+                    let _ = mysql.do_m(update_sql, update_params, &up_info);
+                    total_processed += 1;
+                }
+                Err(e) => {
+                    println!("[do_work] 处理失败: idpk={}, error={}", idpk, e);
+                    let update_sql = "UPDATE synclog SET synced = -1, lasterrinfo = ?, uptime = ? WHERE idpk = ?";
+                    let update_params: Vec<Value> = vec![
+                        Value::String(e.clone()),
+                        Value::String(now),
+                        Value::Number(idpk.into()),
+                    ];
+                    let _ = mysql.do_m(update_sql, update_params, &up_info);
+                }
             }
         }
     }
 
-    let result = ExecutionResult { success_ids, failed };
-    let resp = Response::success_json(&serde_json::to_value(result).unwrap_or_default());
+    let resp = Response::success_json(&serde_json::json!({
+        "processed": total_processed,
+        "batches": batch_count,
+    }));
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+}
+
+/// 执行单条 synclog SQL 操作
+fn execute_synclog_action(mysql: &Mysql78, action: &str, cmdtext: &str, params_str: &str) -> Result<(), String> {
+    let params: Vec<Value> = serde_json::from_str(params_str).unwrap_or_default();
+    let up_info = datastate::MysqlUpInfo::new();
+
+    match action {
+        "insert" | "update" | "delete" => {
+            let result = mysql.do_m(cmdtext, params, &up_info);
+            match result {
+                Ok(r) if r.error.is_none() => Ok(()),
+                Ok(r) => Err(r.error.unwrap_or_else(|| "操作失败".to_string())),
+                Err(e) => Err(e),
+            }
+        }
+        _ => Err(format!("未知的action: {}", action)),
+    }
 }
 
 /// 解码批量数据
