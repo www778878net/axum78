@@ -73,6 +73,7 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
         "maddmany" => m_add_many(&up, &db).await,
         "dowork" => do_work(&up, &db).await,
         "get" => get(&up, &db).await,
+        "gettesttb" => get_testtb(&up, &db).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
@@ -472,4 +473,47 @@ fn process_synclog_item(
         }
         _ => Err(format!("未知的action: {}", action)),
     }
+}
+
+async fn get_testtb(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
+    let limit = up.getnumber as i32;
+    if limit <= 0 {
+        let resp = Response::fail("limit参数无效", -1);
+        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
+
+    let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
+        "SELECT id, idpk, cid, kind, item, data, upby, uptime FROM testtb ORDER BY idpk DESC LIMIT ?",
+        &[&limit as &dyn rusqlite::ToSql],
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            let resp = Response::fail(&format!("查询失败: {}", e), -1);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+        }
+    };
+
+    let items: Vec<crate::apitest::testmenu::testtb::testtbItem> = rows
+        .iter()
+        .map(|row| crate::apitest::testmenu::testtb::testtbItem {
+            id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            idpk: row.get("idpk").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            kind: row.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            item: row.get("item").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            data: row.get("data").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            upby: row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            uptime: row.get("uptime").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        })
+        .collect();
+
+    let result = crate::apitest::testmenu::testtb::testtb { items };
+    let bytedata = result.encode_to_vec();
+    
+    let resp = serde_json::json!({
+        "res": 0,
+        "errmsg": "",
+        "bytedata": bytedata.iter().map(|b| *b as i64).collect::<Vec<i64>>()
+    });
+    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }

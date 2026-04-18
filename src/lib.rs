@@ -19,6 +19,26 @@ pub mod apiopen;
 
 pub use base78::{Base78, CidBase78};
 pub use context::{UpInfo, RequestBody, Context, VerifyResult, get_lovers_state, LoversDataState, LoversDataStateMysql, UserInfo, LOVERS_CREATE_SQL, LOVERS_AUTH_CREATE_SQL, AuthConfig, get_auth_config, sid_auth_middleware};
+
+pub const SYNCLOG_CREATE_SQL: &str = r#"CREATE TABLE IF NOT EXISTS synclog (
+    idpk INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    apisys TEXT NOT NULL DEFAULT 'v1',
+    apimicro TEXT NOT NULL DEFAULT 'iflow',
+    apiobj TEXT NOT NULL DEFAULT 'synclog',
+    tbname TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL DEFAULT '',
+    cmdtext TEXT NOT NULL DEFAULT '',
+    params TEXT NOT NULL DEFAULT '[]',
+    idrow TEXT NOT NULL DEFAULT '',
+    worker TEXT NOT NULL DEFAULT '',
+    synced INTEGER NOT NULL DEFAULT 0,
+    lasterrinfo TEXT NOT NULL DEFAULT '',
+    cmdtextmd5 TEXT NOT NULL DEFAULT '',
+    cid TEXT NOT NULL DEFAULT '',
+    upby TEXT NOT NULL DEFAULT '',
+    uptime TEXT NOT NULL DEFAULT ''
+)"#;
 pub use response::{ApiResponse, ApiError};
 pub use base_api::{BaseApi, TableConfig};
 pub use router::{ApiRouter78, Controller78, create_router, create_router_with_custom};
