@@ -8,6 +8,7 @@
 
 use base::UpInfo;
 use base64::Engine;
+use chrono;
 use datastate::datastate::TestTb;
 use datastate::next_id_string;
 use prost::Message;
@@ -38,11 +39,17 @@ async fn download_from_server(sid: &str) -> Result<Vec<testtbItem>, String> {
     }
     
     // 打印服务器返回的原始数据
-    println!("服务器返回的JSON: {:?}", json);
+    println!("服务器返回的JSON keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
     
-    let bytedata = json.get("bytedata").and_then(|v| v.as_array()).ok_or("无bytedata")?;
-    let bytes: Vec<u8> = bytedata.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect();
+    let bytedata = json.get("bytedata").and_then(|v| v.as_array()).ok_or_else(|| {
+        println!("bytedata字段: {:?}", json.get("bytedata"));
+        "无bytedata".to_string()
+    })?;
+    let bytes: Vec<u8> = bytedata.iter()
+        .filter_map(|v| v.as_i64().map(|n| (n & 0xFF) as u8))
+        .collect();
     println!("bytedata长度: {} bytes", bytes.len());
+    println!("bytedata前20字节: {:?}", &bytes[..bytes.len().min(20)]);
     
     let result = testtb::decode(&*bytes).map_err(|e| e.to_string())?;
     println!("解码后的items数量: {}", result.items.len());
@@ -60,10 +67,67 @@ fn read_local_synclog(_testtb: &TestTb) -> Vec<SynclogItem> {
     let project_path = base::ProjectPath::find().expect("查找项目路径失败");
     let db_path = project_path.local_db();
     let db = datastate::LocalDB::with_path(&db_path.to_string_lossy()).expect("创建数据库失败");
-    let sql = "SELECT id, tbname, action, params, idrow, worker, cid, upby FROM synclog WHERE tbname = 'testtb' AND synced = 0 ORDER BY id";
-    let rows = match db.query(sql, &[]) {
+    
+    // synclog 使用分表 synclog_YYYYMMDD
+    let today = chrono::Local::now().format("%Y%m%d").to_string();
+    let synclog_table = format!("synclog_{}", today);
+    
+    // 先检查分表是否存在
+    let check_sql = format!("SELECT name FROM sqlite_master WHERE type='table' AND name='{}'", synclog_table);
+    let table_exists = match db.query(&check_sql, &[]) {
+        Ok(rows) => !rows.is_empty(),
+        Err(_) => false,
+    };
+    
+    if !table_exists {
+        // 尝试读取普通 synclog 表
+        let check_simple_sql = "SELECT name FROM sqlite_master WHERE type='table' AND name='synclog'";
+        let simple_table_exists = match db.query(check_simple_sql, &[]) {
+            Ok(rows) => !rows.is_empty(),
+            Err(_) => false,
+        };
+        
+        if !simple_table_exists {
+            println!("synclog 表不存在");
+            return Vec::new();
+        }
+        
+        let sql = "SELECT id, tbname, action, cmdtext, params, idrow, worker, cid, upby FROM synclog WHERE tbname = 'testtb' AND synced = 0 ORDER BY id";
+        let rows = match db.query(sql, &[]) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("查询 synclog 失败: {}", e);
+                return Vec::new();
+            }
+        };
+        
+        return rows.iter().map(|row| {
+            SynclogItem {
+                id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                apisys: "v1".to_string(),
+                apimicro: "iflow".to_string(),
+                apiobj: "synclog".to_string(),
+                tbname: row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                action: row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                cmdtext: row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                params: row.get("params").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                idrow: row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                worker: WORKER_A.to_string(),  // 使用测试定义的 worker
+                synced: 0,
+                cmdtextmd5: String::new(),
+                cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                upby: row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            }
+        }).collect();
+    }
+    
+    let sql = format!("SELECT id, tbname, action, cmdtext, params, idrow, worker, cid, upby FROM {} WHERE tbname = 'testtb' AND synced = 0 ORDER BY id", synclog_table);
+    let rows = match db.query(&sql, &[]) {
         Ok(r) => r,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            println!("查询 synclog 失败: {}", e);
+            return Vec::new();
+        }
     };
     
     rows.iter().map(|row| {
@@ -74,10 +138,10 @@ fn read_local_synclog(_testtb: &TestTb) -> Vec<SynclogItem> {
             apiobj: "synclog".to_string(),
             tbname: row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             action: row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            cmdtext: String::new(),
+            cmdtext: row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             params: row.get("params").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             idrow: row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            worker: row.get("worker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            worker: WORKER_A.to_string(),  // 使用测试定义的 worker
             synced: 0,
             cmdtextmd5: String::new(),
             cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -87,8 +151,27 @@ fn read_local_synclog(_testtb: &TestTb) -> Vec<SynclogItem> {
 }
 
 fn read_remote_synclog(testtb: &TestTb) -> Vec<SynclogItem> {
-    let sql = "SELECT id, tbname, action, params, idrow, worker, cid, upby FROM synclog WHERE tbname = 'testtb' AND synced = 0 ORDER BY id";
-    let rows = testtb.db.query(sql, &[]).unwrap();
+    // synclog 使用分表 synclog_YYYYMMDD
+    let today = chrono::Local::now().format("%Y%m%d").to_string();
+    let synclog_table = format!("synclog_{}", today);
+    
+    // 先检查分表是否存在
+    let check_sql = format!("SELECT name FROM sqlite_master WHERE type='table' AND name='{}'", synclog_table);
+    let table_exists = match testtb.db.query(&check_sql, &[]) {
+        Ok(rows) => !rows.is_empty(),
+        Err(_) => false,
+    };
+    
+    let actual_table = if table_exists { synclog_table } else { "synclog".to_string() };
+    
+    let sql = format!("SELECT id, tbname, action, cmdtext, params, idrow, worker, cid, upby FROM {} WHERE tbname = 'testtb' AND synced = 0 ORDER BY id", actual_table);
+    let rows = match testtb.db.query(&sql, &[]) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("查询远程 synclog 失败: {}", e);
+            return Vec::new();
+        }
+    };
     
     rows.iter().map(|row| {
         SynclogItem {
@@ -98,10 +181,10 @@ fn read_remote_synclog(testtb: &TestTb) -> Vec<SynclogItem> {
             apiobj: "synclog".to_string(),
             tbname: row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             action: row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            cmdtext: String::new(),
+            cmdtext: row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             params: row.get("params").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             idrow: row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            worker: row.get("worker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            worker: WORKER_B.to_string(),  // 使用 WORKER_B
             synced: 0,
             cmdtextmd5: String::new(),
             cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -111,18 +194,16 @@ fn read_remote_synclog(testtb: &TestTb) -> Vec<SynclogItem> {
 }
 
 async fn upload_synclog(sid: &str, items: Vec<SynclogItem>) -> Result<i32, String> {
-    use base64::{Engine as _, engine::general_purpose};
-    
     let client = reqwest::Client::new();
     let batch = SynclogBatch { items };
     let bytedata = batch.encode_to_vec();
-    let bytedata_base64 = general_purpose::STANDARD.encode(&bytedata);
     
-    let up = serde_json::json!({
+    // 使用 bytedata 字段传 protobuf 数据（省空间）
+    let body = serde_json::json!({
         "sid": sid,
-        "jsdata": bytedata_base64
+        "bytedata": bytedata.iter().map(|b| *b as i64).collect::<Vec<i64>>()
     });
-    let body = serde_json::to_string(&up).map_err(|e| e.to_string())?;
+    let body = serde_json::to_string(&body).map_err(|e| e.to_string())?;
     
     let resp = client
         .post(format!("{}/apisvc/backsvc/synclog/maddmany", SERVER_URL))
@@ -138,14 +219,23 @@ async fn upload_synclog(sid: &str, items: Vec<SynclogItem>) -> Result<i32, Strin
         return Err(json.get("errmsg").and_then(|v| v.as_str()).unwrap_or("未知错误").to_string());
     }
     
-    let jsdata_str = json.get("jsdata").and_then(|v| v.as_str()).unwrap();
-    let jsdata: serde_json::Value = serde_json::from_str(jsdata_str).unwrap();
+    let jsdata_str = json.get("back").and_then(|v| v.as_str()).ok_or("无back字段")?;
+    let jsdata: serde_json::Value = serde_json::from_str(jsdata_str).map_err(|e| e.to_string())?;
     Ok(jsdata.get("batches").and_then(|v| v.as_i64()).unwrap_or(0) as i32)
 }
 
-async fn do_work() -> Result<(i32, i32), String> {
+async fn do_work(sid: &str, worker: &str) -> Result<(i32, i32), String> {
     let client = reqwest::Client::new();
-    let body = serde_json::json!({"sid": "test"}).to_string();
+    // 使用 bytedata 传 worker 参数（前缀 0x01 表示 UTF-8 JSON）
+    let worker_json = serde_json::json!({"worker": worker}).to_string();
+    let mut bytedata = vec![0x01u8; 8];  // 8字节前缀，首字节=1表示UTF-8 JSON
+    bytedata.extend_from_slice(worker_json.as_bytes());
+    
+    let body = serde_json::json!({
+        "sid": sid,
+        "bytedata": bytedata.iter().map(|b| *b as i64).collect::<Vec<i64>>()
+    });
+    let body = serde_json::to_string(&body).map_err(|e| e.to_string())?;
     
     let resp = client
         .post(format!("{}/apisvc/backsvc/synclog/dowork", SERVER_URL))
@@ -161,7 +251,8 @@ async fn do_work() -> Result<(i32, i32), String> {
         return Err(json.get("errmsg").and_then(|v| v.as_str()).unwrap_or("未知错误").to_string());
     }
     
-    let jsdata = json.get("jsdata").ok_or("无jsdata")?;
+    let back_str = json.get("back").and_then(|v| v.as_str()).ok_or("无back字段")?;
+    let jsdata: serde_json::Value = serde_json::from_str(back_str).map_err(|e| e.to_string())?;
     Ok((
         jsdata.get("processed").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         jsdata.get("batches").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
@@ -210,7 +301,14 @@ async fn test_all_plans() {
     println!("客户端数据库路径: {}", local_db_path);
     let local_testtb = TestTb::with_db_path(&local_db_path);
     let _ = local_testtb.db.execute("DROP TABLE IF EXISTS testtb");
-    let _ = local_testtb.db.execute("DELETE FROM synclog WHERE tbname='testtb'");
+    
+    // 清理 synclog 相关表（包括分表和主表）
+    let today = chrono::Local::now().format("%Y%m%d").to_string();
+    let synclog_shard = format!("synclog_{}", today);
+    let _ = local_testtb.db.execute(&format!("DROP TABLE IF EXISTS {}", synclog_shard));
+    let _ = local_testtb.db.execute("DROP TABLE IF EXISTS synclog");
+    println!("客户端数据库: 已清理 synclog 表");
+    
     let _ = local_testtb.db.execute(datastate::datastate::TESTTB_CREATE_SQL);
     let _ = local_testtb.db.execute(datastate::SYS_SQL_CREATE_SQL_SQLITE);
     // 创建 synclog 表
@@ -337,7 +435,7 @@ async fn test_all_plans() {
     println!("上传 {} 条synclog", batches);
     
     // 执行doWork
-    let (processed, _) = do_work().await.expect("doWork失败");
+    let (processed, _) = do_work(&sid, WORKER_A).await.expect("doWork失败");
     println!("doWork处理 {} 条", processed);
     
     // 验证服务器数据（远程数据库）
@@ -350,6 +448,9 @@ async fn test_all_plans() {
     
     // ===== 方案3: 服务器变更同步 =====
     println!("\n========== 方案3: 服务器变更同步 ==========");
+    
+    // 重置 SQLITE_PATH 让服务器 synclog 写入 remote.db
+    std::env::set_var("SQLITE_PATH", "docs/config/remote.db");
     
     // 服务器端直接操作数据库（使用 DataState 基类）
     // 这些操作会产生 synclog，客户端可以下载并执行
@@ -375,12 +476,23 @@ async fn test_all_plans() {
     println!("上传 {} 条synclog", batches);
     
     // 执行doWork (这会在服务器端执行INSERT)
-    let (processed, _) = do_work().await.expect("doWork失败");
+    let (processed, _) = do_work(&format!("{}|{}", CID, WORKER_B), WORKER_B).await.expect("doWork失败");
     println!("doWork处理 {} 条", processed);
+    
+    // 等待 synclog 标记为 synced
+    std::thread::sleep(std::time::Duration::from_secs(6));
     
     // 客户端下载synclog (worker != WORKER_A)
     let client = reqwest::Client::new();
-    let body = serde_json::json!({"sid": format!("{}|{}", CID, WORKER_A), "getnumber": 100}).to_string();
+    // 使用 bytedata 传 worker 参数（前缀 0x01 表示 UTF-8 JSON）
+    let worker_json = serde_json::json!({"worker": WORKER_A}).to_string();
+    let mut bytedata = vec![0x01u8; 8];
+    bytedata.extend_from_slice(worker_json.as_bytes());
+    let body = serde_json::json!({
+        "sid": format!("{}|{}", CID, WORKER_A),
+        "getnumber": 100,
+        "bytedata": bytedata.iter().map(|b| *b as i64).collect::<Vec<i64>>()
+    }).to_string();
     let resp = client
         .post(format!("{}/apisvc/backsvc/synclog/get", SERVER_URL))
         .header("Content-Type", "application/json")
@@ -395,10 +507,10 @@ async fn test_all_plans() {
         panic!("下载synclog失败: {:?}", json.get("errmsg"));
     }
     
-    // jsdata字段是JSON字符串
-    let jsdata_str = json.get("jsdata").and_then(|v| v.as_str()).expect("无jsdata");
-    let jsdata: serde_json::Value = serde_json::from_str(jsdata_str).expect("解析jsdata失败");
-    let bytedata_base64 = jsdata.get("bytedata").and_then(|v| v.as_str()).expect("无bytedata");
+    // back字段是JSON字符串
+    let back_str = json.get("back").and_then(|v| v.as_str()).expect("无back字段");
+    let back_data: serde_json::Value = serde_json::from_str(back_str).expect("解析back失败");
+    let bytedata_base64 = back_data.get("bytedata").and_then(|v| v.as_str()).expect("无bytedata");
     let bytes = base64::engine::general_purpose::STANDARD.decode(bytedata_base64.as_bytes()).expect("Base64解码失败");
     let synclog_batch = SynclogBatch::decode(&*bytes).expect("解码失败");
     
@@ -564,7 +676,7 @@ async fn test_all_plans() {
     println!("上传客户端synclog: {} 条", batches1);
 
     // 执行doWork应用客户端变更
-    let (processed1, _) = do_work().await.expect("doWork处理客户端变更失败");
+    let (processed1, _) = do_work(&sid, WORKER_A).await.expect("doWork处理客户端变更失败");
     println!("doWork处理客户端变更: {} 条", processed1);
 
     // 步骤D: 服务器端上传变更（模拟另一个worker）
@@ -573,10 +685,71 @@ async fn test_all_plans() {
     println!("上传服务器synclog: {} 条", batches2);
 
     // 执行doWork应用服务器变更
-    let (processed2, _) = do_work().await.expect("doWork处理服务器变更失败");
+    let (processed2, _) = do_work(&format!("{}|{}", CID, WORKER_B), WORKER_B).await.expect("doWork处理服务器变更失败");
     println!("doWork处理服务器变更: {} 条", processed2);
 
-    // 步骤E: 冲突解决验证
+    // 等待 synclog 标记为 synced
+    std::thread::sleep(std::time::Duration::from_secs(6));
+
+    // 步骤E: 客户端下载服务器变更
+    let client2 = reqwest::Client::new();
+    // 使用 bytedata 传 worker 参数（前缀 0x01 表示 UTF-8 JSON）
+    let worker_json2 = serde_json::json!({"worker": WORKER_A}).to_string();
+    let mut bytedata2 = vec![0x01u8; 8];
+    bytedata2.extend_from_slice(worker_json2.as_bytes());
+    let body2 = serde_json::json!({
+        "sid": format!("{}|{}", CID, WORKER_A),
+        "getnumber": 100,
+        "bytedata": bytedata2.iter().map(|b| *b as i64).collect::<Vec<i64>>()
+    }).to_string();
+    let resp2 = client2
+        .post(format!("{}/apisvc/backsvc/synclog/get", SERVER_URL))
+        .header("Content-Type", "application/json")
+        .body(body2)
+        .send()
+        .await
+        .expect("请求失败");
+    
+    let json2: serde_json::Value = resp2.json().await.expect("解析失败");
+    let res2 = json2.get("res").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if res2 != 0 {
+        panic!("下载服务器变更失败: {:?}", json2.get("errmsg"));
+    }
+    
+    let back_str2 = json2.get("back").and_then(|v| v.as_str()).expect("无back字段");
+    let back_data2: serde_json::Value = serde_json::from_str(back_str2).expect("解析back失败");
+    let bytedata_base64_2 = back_data2.get("bytedata").and_then(|v| v.as_str()).expect("无bytedata");
+    let bytes2 = base64::engine::general_purpose::STANDARD.decode(bytedata_base64_2.as_bytes()).expect("Base64解码失败");
+    let synclog_batch2 = SynclogBatch::decode(&*bytes2).expect("解码失败");
+    
+    println!("客户端下载服务器变更: {} 条", synclog_batch2.items.len());
+    
+    // 客户端应用服务器变更
+    for item in &synclog_batch2.items {
+        if item.tbname != "testtb" || item.idrow != conflict_id {
+            continue;
+        }
+        println!("客户端应用服务器变更: action={}, id={}", item.action, item.idrow);
+        let params: Vec<serde_json::Value> = serde_json::from_str(&item.params).unwrap_or_default();
+        match item.action.as_str() {
+            "update" => {
+                // params 顺序：data, item, kind, uptime, id（id 在最后）
+                // println!("  UPDATE params: {:?}", params);
+                let id = params.last().and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let mut record = std::collections::HashMap::new();
+                record.insert("data".to_string(), params.get(0).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("item".to_string(), params.get(1).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("kind".to_string(), params.get(2).cloned().unwrap_or(serde_json::Value::Null));
+                if params.len() > 3 {
+                    record.insert("uptime".to_string(), params.get(3).cloned().unwrap_or(serde_json::Value::Null));
+                }
+                let _ = local_testtb.m_sync_update(&id, &record);
+            }
+            _ => {}
+        }
+    }
+
+    // 步骤F: 冲突解决验证
     // 现在两边应该都同步了。根据时间戳优先原则，较新的那个应该胜出
     // 我们需要检查最终值是否符合预期
 
