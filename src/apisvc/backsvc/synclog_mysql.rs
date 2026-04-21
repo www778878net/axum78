@@ -300,12 +300,16 @@ async fn do_work(up: &UpInfo, mysql: &Mysql78, _user_cid: &str) -> (StatusCode, 
             let idpk = row.get("idpk").and_then(|v| v.as_i64()).unwrap_or(0);
             let tbname = row.get("tbname").and_then(|v| v.as_str()).unwrap_or("");
             let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("");
-            let params_str = row.get("params").and_then(|v| v.as_str()).unwrap_or("[]");
+            let params_str = match row.get("params") {
+                Some(Value::String(s)) => s.clone(),
+                Some(v @ Value::Array(_)) => serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()),
+                _ => "[]".to_string(),
+            };
             let cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("");
             let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("");
             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-            let result = execute_synclog_action(mysql, action, cmdtext, params_str);
+            let result = execute_synclog_action(mysql, action, cmdtext, &params_str);
 
             match result {
                 Ok(_) => {
