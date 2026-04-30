@@ -126,7 +126,7 @@ impl Base78 {
         self.logger.detail(&format!("执行SQL: {}", sql));
         
         let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
-        self.datastate.do_get(&sql, &params_refs, "base78", "get")
+        self.datastate.do_get(&sql, &params_refs, "base78", "get").await
     }
 
     /// 查询所有记录
@@ -140,37 +140,37 @@ impl Base78 {
         
         self.logger.detail(&format!("执行SQL: {}", sql));
         
-        self.datastate.do_get(&sql, &params, "base78", "get_all")
+        self.datastate.do_get(&sql, &params, "base78", "get_all").await
     }
 
     /// 根据ID查询
     pub async fn get_by_id(&self, up: &UpInfo, id: &str) -> Result<Option<HashMap<String, Value>>, String> {
-        self.datastate.get_one(id, "base78", "get_by_id")
+        self.datastate.get_one(id, "base78", "get_by_id").await
     }
 
     /// 添加记录
     pub async fn m_add(&self, up: &UpInfo, record: &HashMap<String, Value>) -> Result<String, String> {
         self.check_admin_permission(up)?;
-        self.datastate.m_add(record, "base78", "m_add")
+        self.datastate.m_add(record, "base78", "m_add").await
     }
 
     /// 更新记录
     pub async fn m_update(&self, up: &UpInfo, id: &str, record: &HashMap<String, Value>) -> Result<bool, String> {
         self.check_admin_permission(up)?;
-        self.datastate.m_update(id, record, "base78", "m_update")
+        self.datastate.m_update(id, record, "base78", "m_update").await
     }
 
     /// 删除记录
     pub async fn m_del(&self, up: &UpInfo, id: &str) -> Result<bool, String> {
         self.check_admin_permission(up)?;
-        self.datastate.m_del(id, "base78", "m_del")
+        self.datastate.m_del(id, "base78", "m_del").await
     }
 
     /// 执行自定义查询
     pub async fn do_get(&self, sql: &str, params: Vec<String>) -> Result<Vec<HashMap<String, Value>>, String> {
         self.logger.detail(&format!("执行SQL: {}", sql));
         let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
-        self.datastate.do_get(sql, &params_refs, "base78", "do_get")
+        self.datastate.do_get(sql, &params_refs, "base78", "do_get").await
     }
 }
 

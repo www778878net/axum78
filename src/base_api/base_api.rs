@@ -78,7 +78,7 @@ pub trait BaseApi: Send + Sync + 'static {
         let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
 
         self.db()
-            .do_get(&sql, &params, &up)
+            .do_get(&sql, &params, &up).await
             .map_err(|e| ApiError::new(&e, -3))?
             .into_iter()
             .map(|row| {
@@ -101,7 +101,7 @@ pub trait BaseApi: Send + Sync + 'static {
         let params: [&dyn rusqlite::ToSql; 2] = [&id, &self.context().cid];
 
         let rows = self.db()
-            .do_get(&sql, &params, &up)
+            .do_get(&sql, &params, &up).await
             .map_err(|e| ApiError::new(&e, -3))?;
 
         if rows.is_empty() {
@@ -163,7 +163,7 @@ pub trait BaseApi: Send + Sync + 'static {
         let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
         self.db()
-            .do_m_add(&sql, &params_ref, &up)
+            .do_m_add(&sql, &params_ref, &up).await
             .map_err(|e| ApiError::new(&e, -3))?;
 
         Ok(id)
@@ -216,7 +216,7 @@ pub trait BaseApi: Send + Sync + 'static {
         let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
         let result = self.db()
-            .do_m(&sql, &params_ref, &up)
+            .do_m(&sql, &params_ref, &up).await
             .map_err(|e| ApiError::new(&e, -3))?;
 
         Ok(result.affected_rows > 0)
@@ -235,7 +235,7 @@ pub trait BaseApi: Send + Sync + 'static {
         let params: [&dyn rusqlite::ToSql; 2] = [&id, &self.context().cid];
 
         let result = self.db()
-            .do_m(&sql, &params, &up)
+            .do_m(&sql, &params, &up).await
             .map_err(|e| ApiError::new(&e, -3))?;
 
         Ok(result.affected_rows > 0)

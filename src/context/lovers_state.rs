@@ -168,7 +168,7 @@ impl LoversDataState {
     /// 初始化表
     pub fn init_tables(&self) -> Result<(), String> {
         let conn = self.datasync.db.get_conn();
-        let conn_guard = conn.lock().map_err(|e| e.to_string())?;
+        let conn_guard = conn.blocking_lock();
 
         conn_guard
             .execute(LOVERS_CREATE_SQL, [])
@@ -185,7 +185,7 @@ impl LoversDataState {
     /// 
     /// 从数据库验证 SID 或 SID_WEB 是否有效
     /// 两端都可以登录，用 OR 查询
-    pub fn verify_sid(&self, sid: &str) -> Result<VerifyResult, String> {
+    pub async fn verify_sid(&self, sid: &str) -> Result<VerifyResult, String> {
         if sid.is_empty() {
             return Err("无效的SID: sid为空".to_string());
         }
@@ -197,7 +197,7 @@ impl LoversDataState {
             WHERE la.sid = ? OR la.sid_web = ?
         "#;
 
-        let rows = self.datasync.do_get(sql, &[&sid as &dyn rusqlite::ToSql, &sid as &dyn rusqlite::ToSql])
+        let rows = self.datasync.do_get(sql, &[&sid as &dyn rusqlite::ToSql, &sid as &dyn rusqlite::ToSql]).await
             .map_err(|e| format!("验证失败: {}", e))?;
 
         if rows.is_empty() {

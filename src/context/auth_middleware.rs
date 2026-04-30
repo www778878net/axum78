@@ -246,7 +246,7 @@ pub async fn sid_auth_middleware(
 
     
     let lovers_state = get_lovers_state();
-    let verify_result = match lovers_state.verify_sid(&up.sid) {
+    let verify_result = match lovers_state.verify_sid(&up.sid).await {
         Ok(v) => v,
         Err(e) => {
             logger.detail(&format!("验证失败，使用GUEST身份: {}", e));

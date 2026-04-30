@@ -173,7 +173,7 @@ async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
 
     ensure_synclog_table(db);
 
-    let count_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog WHERE worker = ?", &[&worker as &dyn rusqlite::ToSql]) {
+    let count_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog WHERE worker = ?", &[&worker as &dyn rusqlite::ToSql]).await {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询synclog表失败: {}", e), -1);
@@ -182,7 +182,7 @@ async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     };
     let total_count = count_rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()).unwrap_or(0);
 
-    let pending_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog WHERE synced = 0 AND worker = ?", &[&worker as &dyn rusqlite::ToSql]) {
+    let pending_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM synclog WHERE synced = 0 AND worker = ?", &[&worker as &dyn rusqlite::ToSql]).await {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询pending记录失败: {}", e), -1);
@@ -202,7 +202,7 @@ async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
         let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
             "SELECT * FROM synclog WHERE synced = 0 AND worker = ? ORDER BY idpk ASC LIMIT ?",
             &[&worker as &dyn rusqlite::ToSql, &limit as &dyn rusqlite::ToSql],
-        ) {
+        ).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[doWork] 查询失败: {}", e);
@@ -238,7 +238,7 @@ async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
 
             println!("[doWork] 处理记录: idpk={}, tbname={}, action={}, idrow={}", idpk, tbname, action, idrow);
 
-            let result = process_synclog_item(db, &upby, &tbname, &action, &params_str, &idrow, &synclog_uptime, &cmdtext);
+            let result = process_synclog_item(db, &upby, &tbname, &action, &params_str, &idrow, &synclog_uptime, &cmdtext).await;
             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
             match result {
@@ -247,7 +247,7 @@ async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
                     let _ = db.execute_with_params(
                         "UPDATE synclog SET synced = 1, lasterrinfo = '', uptime = ? WHERE idpk = ?",
                         &[&now as &dyn rusqlite::ToSql, &idpk],
-                    );
+                    ).await;
                     total_processed += 1;
                 }
                 Err(e) => {
@@ -255,7 +255,7 @@ async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
                     let _ = db.execute_with_params(
                         "UPDATE synclog SET synced = -1, lasterrinfo = ?, uptime = ? WHERE idpk = ?",
                         &[&e as &dyn rusqlite::ToSql, &now, &idpk],
-                    );
+                    ).await;
                 }
             }
         }
@@ -304,7 +304,7 @@ async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
         "SELECT * FROM synclog WHERE synced = 1 AND worker != ? AND idpk > ? AND uptime <= ? ORDER BY idpk ASC LIMIT ?",
         &[&worker as &dyn rusqlite::ToSql, &last_server_id, &safe_datetime, &limit as &dyn rusqlite::ToSql],
-    ) {
+    ).await {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询失败: {}", e), -1);
@@ -431,7 +431,7 @@ fn build_record_from_params(columns: &[String], params: Vec<Value>) -> std::coll
     record
 }
 
-fn process_synclog_item(
+async fn process_synclog_item(
     db: &LocalDB,
     _upby: &str,
     tbname: &str,
@@ -449,7 +449,7 @@ fn process_synclog_item(
             let columns = parse_columns_from_cmdtext(cmdtext, action)?;
             let params: Vec<Value> = serde_json::from_str(params_str).unwrap_or_default();
             let record = build_record_from_params(&columns, params);
-            datastate.datasync.m_sync_save(&record)
+            datastate.datasync.m_sync_save(&record).await
                 .map(|_| ())
                 .map_err(|e| e)
         }
@@ -462,12 +462,12 @@ fn process_synclog_item(
                 .and_then(|v| v.as_str())
                 .unwrap_or(idrow)
                 .to_string();
-            datastate.datasync.m_sync_update(&id, &record)
+            datastate.datasync.m_sync_update(&id, &record).await
                 .map(|_| ())
                 .map_err(|e| e)
         }
         "delete" => {
-            datastate.datasync.m_sync_del(idrow)
+            datastate.datasync.m_sync_del(idrow).await
                 .map(|_| ())
                 .map_err(|e| e)
         }
@@ -485,7 +485,7 @@ async fn get_testtb(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
         "SELECT id, idpk, cid, kind, item, data, upby, uptime FROM testtb ORDER BY idpk DESC LIMIT ?",
         &[&limit as &dyn rusqlite::ToSql],
-    ) {
+    ).await {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询失败: {}", e), -1);
