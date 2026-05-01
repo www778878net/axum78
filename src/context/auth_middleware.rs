@@ -5,12 +5,11 @@
 use axum::{
     body::Bytes,
     http::{header, StatusCode, Request},
-    extract::Path as AxumPath,
     response::{IntoResponse, Response},
     middleware::Next,
 };
 use base::{UpInfo, Response as BaseResponse, ProjectPath, MyLogger};
-use crate::{get_lovers_state, LoversDataState, VerifyResult};
+use crate::{get_lovers_state, VerifyResult};
 use std::collections::HashSet;
 use serde::{Serialize, Deserialize};
 
@@ -213,7 +212,7 @@ pub async fn sid_auth_middleware(
         .unwrap_or_default();
     
     // 使用最小请求体解析，然后转换为UpInfo
-    let up: UpInfo = match serde_json::from_slice::<MinimalRequest>(&body_bytes) {
+    let mut up: UpInfo = match serde_json::from_slice::<MinimalRequest>(&body_bytes) {
         Ok(min) => min.into(),
         Err(e) => {
             // For wework/callback routes, allow empty body (GET request or XML body)
@@ -235,16 +234,16 @@ pub async fn sid_auth_middleware(
     // 检查白名单
     if auth_config.should_skip(&apisys_lower, &apimicro_lower, &apiobj_lower) {
         logger.detail(&format!("跳过认证: {}/{}/{}", apisys_lower, apimicro_lower, apiobj_lower));
-        let verify_result = VerifyResult::new(&up.cid, &up.uid, &up.uname);
+        up.apisys = apisys.clone();
+        up.apimicro = apimicro.clone();
+        up.apiobj = apiobj.clone();
+        up.apifun = apifun.clone();
         let mut builder = Request::new(axum::body::Body::from(body_bytes));
         *builder.uri_mut() = uri;
-        builder.extensions_mut().insert(verify_result);
         builder.extensions_mut().insert(up);
-        builder.extensions_mut().insert((apisys, apimicro, apiobj, apifun));
         return next.run(builder).await;
     }
 
-    
     let lovers_state = get_lovers_state();
     let verify_result = match lovers_state.verify_sid(&up.sid).await {
         Ok(v) => v,
@@ -254,12 +253,17 @@ pub async fn sid_auth_middleware(
         }
     };
 
-    
+    // 更新 up 的用户信息
+    up.cid = verify_result.cid.clone();
+    up.uid = verify_result.uid.clone();
+    up.uname = verify_result.uname.clone();
+    up.apisys = apisys.clone();
+    up.apimicro = apimicro.clone();
+    up.apiobj = apiobj.clone();
+    up.apifun = apifun.clone();
     let mut builder = Request::new(axum::body::Body::from(body_bytes));
     *builder.uri_mut() = uri;
-    builder.extensions_mut().insert(verify_result);
     builder.extensions_mut().insert(up);
-    builder.extensions_mut().insert((apisys, apimicro, apiobj, apifun));
     
     next.run(builder).await
 }

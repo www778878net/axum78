@@ -19,7 +19,6 @@ pub mod apiopen;
 
 pub use base78::{Base78, CidBase78};
 pub use context::{UpInfo, RequestBody, Context, VerifyResult, get_lovers_state, LoversDataState, LoversDataStateMysql, UserInfo, LOVERS_CREATE_SQL, LOVERS_AUTH_CREATE_SQL, AuthConfig, get_auth_config, sid_auth_middleware};
-pub use router::ApiPath;
 
 pub const SYNCLOG_CREATE_SQL: &str = r#"CREATE TABLE IF NOT EXISTS synclog (
     idpk INTEGER PRIMARY KEY AUTOINCREMENT,
