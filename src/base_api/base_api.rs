@@ -75,7 +75,9 @@ pub trait BaseApi: Send + Sync + 'static {
             config.tbname, where_clause
         );
 
-        let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let params: Vec<rusqlite::types::Value> = values.iter()
+            .map(|s| rusqlite::types::Value::Text(s.clone()))
+            .collect();
 
         self.db()
             .do_get(&sql, &params, &up).await
@@ -98,7 +100,10 @@ pub trait BaseApi: Send + Sync + 'static {
             config.tbname, config.id_field, config.uidcid
         );
 
-        let params: [&dyn rusqlite::ToSql; 2] = [&id, &self.context().cid];
+        let params: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Text(id.to_string()),
+            rusqlite::types::Value::Text(self.context().cid.clone())
+        ];
 
         let rows = self.db()
             .do_get(&sql, &params, &up).await
@@ -144,26 +149,24 @@ pub trait BaseApi: Send + Sync + 'static {
         );
 
         // 构建参数
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut params: Vec<rusqlite::types::Value> = Vec::new();
         for col in &cols {
             if let Some(val) = obj.get(col) {
                 match val {
-                    Value::String(s) => params.push(Box::new(s.clone())),
-                    Value::Number(n) => params.push(Box::new(n.as_i64().unwrap_or(0))),
-                    Value::Bool(b) => params.push(Box::new(*b as i64)),
-                    _ => params.push(Box::new(val.to_string())),
+                    Value::String(s) => params.push(rusqlite::types::Value::Text(s.clone())),
+                    Value::Number(n) => params.push(rusqlite::types::Value::Integer(n.as_i64().unwrap_or(0))),
+                    Value::Bool(b) => params.push(rusqlite::types::Value::Integer(*b as i64)),
+                    _ => params.push(rusqlite::types::Value::Text(val.to_string())),
                 }
             }
         }
-        params.push(Box::new(id.clone()));
-        params.push(Box::new(ctx.uname.clone()));
-        params.push(Box::new(ctx.uptime.clone()));
-        params.push(Box::new(ctx.cid.clone()));
-
-        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        params.push(rusqlite::types::Value::Text(id.clone()));
+        params.push(rusqlite::types::Value::Text(ctx.uname.clone()));
+        params.push(rusqlite::types::Value::Text(ctx.uptime.clone()));
+        params.push(rusqlite::types::Value::Text(ctx.cid.clone()));
 
         self.db()
-            .do_m_add(&sql, &params_ref, &up).await
+            .do_m_add(&sql, &params, &up).await
             .map_err(|e| ApiError::new(&e, -3))?;
 
         Ok(id)
@@ -197,26 +200,24 @@ pub trait BaseApi: Send + Sync + 'static {
         );
 
         // 构建参数
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut params: Vec<rusqlite::types::Value> = Vec::new();
         for col in &cols {
             if let Some(val) = obj.get(col) {
                 match val {
-                    Value::String(s) => params.push(Box::new(s.clone())),
-                    Value::Number(n) => params.push(Box::new(n.as_i64().unwrap_or(0))),
-                    Value::Bool(b) => params.push(Box::new(*b as i64)),
-                    _ => params.push(Box::new(val.to_string())),
+                    Value::String(s) => params.push(rusqlite::types::Value::Text(s.clone())),
+                    Value::Number(n) => params.push(rusqlite::types::Value::Integer(n.as_i64().unwrap_or(0))),
+                    Value::Bool(b) => params.push(rusqlite::types::Value::Integer(*b as i64)),
+                    _ => params.push(rusqlite::types::Value::Text(val.to_string())),
                 }
             }
         }
-        params.push(Box::new(ctx.uname.clone()));
-        params.push(Box::new(ctx.uptime.clone()));
-        params.push(Box::new(id.to_string()));
-        params.push(Box::new(ctx.cid.clone()));
-
-        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        params.push(rusqlite::types::Value::Text(ctx.uname.clone()));
+        params.push(rusqlite::types::Value::Text(ctx.uptime.clone()));
+        params.push(rusqlite::types::Value::Text(id.to_string()));
+        params.push(rusqlite::types::Value::Text(ctx.cid.clone()));
 
         let result = self.db()
-            .do_m(&sql, &params_ref, &up).await
+            .do_m(&sql, &params, &up).await
             .map_err(|e| ApiError::new(&e, -3))?;
 
         Ok(result.affected_rows > 0)
@@ -232,7 +233,10 @@ pub trait BaseApi: Send + Sync + 'static {
             config.tbname, config.id_field, config.uidcid
         );
 
-        let params: [&dyn rusqlite::ToSql; 2] = [&id, &self.context().cid];
+        let params: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Text(id.to_string()),
+            rusqlite::types::Value::Text(self.context().cid.clone())
+        ];
 
         let result = self.db()
             .do_m(&sql, &params, &up).await

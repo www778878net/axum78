@@ -129,20 +129,20 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
 
         let _ = db.execute_with_params(
             sql,
-            &[
-                &id as &dyn rusqlite::ToSql,
-                &item.apisys,
-                &item.apimicro,
-                &item.apiobj,
-                &item.tbname,
-                &item.action,
-                &item.cmdtext,
-                &item.params,
-                &item.idrow,
-                &item.worker,
-                &item.cmdtextmd5,
-                &expected_cid,
-                &item.upby,
+            vec![
+                rusqlite::types::Value::Text(id.clone()),
+                rusqlite::types::Value::Text(item.apisys.clone()),
+                rusqlite::types::Value::Text(item.apimicro.clone()),
+                rusqlite::types::Value::Text(item.apiobj.clone()),
+                rusqlite::types::Value::Text(item.tbname.clone()),
+                rusqlite::types::Value::Text(item.action.clone()),
+                rusqlite::types::Value::Text(item.cmdtext.clone()),
+                rusqlite::types::Value::Text(item.params.clone()),
+                rusqlite::types::Value::Text(item.idrow.clone()),
+                rusqlite::types::Value::Text(item.worker.clone()),
+                rusqlite::types::Value::Text(item.cmdtextmd5.clone()),
+                rusqlite::types::Value::Text(expected_cid.clone()),
+                rusqlite::types::Value::Text(item.upby.clone()),
             ],
         );
         batches += 1;
@@ -246,7 +246,10 @@ async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
                     println!("[doWork] 处理成功: idpk={}", idpk);
                     let _ = db.execute_with_params(
                         "UPDATE synclog SET synced = 1, lasterrinfo = '', uptime = ? WHERE idpk = ?",
-                        &[&now as &dyn rusqlite::ToSql, &idpk],
+                        vec![
+                            rusqlite::types::Value::Text(now.clone()),
+                            rusqlite::types::Value::Integer(idpk as i64),
+                        ],
                     ).await;
                     total_processed += 1;
                 }
@@ -254,7 +257,11 @@ async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
                     println!("[doWork] 处理失败: idpk={}, error={}", idpk, e);
                     let _ = db.execute_with_params(
                         "UPDATE synclog SET synced = -1, lasterrinfo = ?, uptime = ? WHERE idpk = ?",
-                        &[&e as &dyn rusqlite::ToSql, &now, &idpk],
+                        vec![
+                            rusqlite::types::Value::Text(e.clone()),
+                            rusqlite::types::Value::Text(now.clone()),
+                            rusqlite::types::Value::Integer(idpk as i64),
+                        ],
                     ).await;
                 }
             }

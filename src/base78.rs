@@ -125,8 +125,8 @@ impl Base78 {
         
         self.logger.detail(&format!("执行SQL: {}", sql));
         
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
-        self.datastate.do_get(&sql, &params_refs, "base78", "get").await
+        let params_values: Vec<rusqlite::types::Value> = params.iter().map(|p| rusqlite::types::Value::Text(p.clone())).collect();
+        self.datastate.do_get(&sql, params_values, "base78", "get").await
     }
 
     /// 查询所有记录
@@ -136,11 +136,9 @@ impl Base78 {
             self.tbname, self.uidcid, up.order, up.getstart, up.getnumber
         );
         
-        let params: Vec<&dyn rusqlite::ToSql> = vec![&up.cid];
-        
         self.logger.detail(&format!("执行SQL: {}", sql));
         
-        self.datastate.do_get(&sql, &params, "base78", "get_all").await
+        self.datastate.do_get(&sql, vec![rusqlite::types::Value::Text(up.cid.clone())], "base78", "get_all").await
     }
 
     /// 根据ID查询
@@ -169,8 +167,8 @@ impl Base78 {
     /// 执行自定义查询
     pub async fn do_get(&self, sql: &str, params: Vec<String>) -> Result<Vec<HashMap<String, Value>>, String> {
         self.logger.detail(&format!("执行SQL: {}", sql));
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
-        self.datastate.do_get(sql, &params_refs, "base78", "do_get").await
+        let params_values: Vec<rusqlite::types::Value> = params.iter().map(|p| rusqlite::types::Value::Text(p.clone())).collect();
+        self.datastate.do_get(sql, params_values, "base78", "do_get").await
     }
 }
 

@@ -197,7 +197,10 @@ impl LoversDataState {
             WHERE la.sid = ? OR la.sid_web = ?
         "#;
 
-        let rows = self.datasync.do_get(sql, &[&sid as &dyn rusqlite::ToSql, &sid as &dyn rusqlite::ToSql]).await
+        let rows = self.datasync.db.do_get(sql, vec![
+            rusqlite::types::Value::Text(sid.to_string()),
+            rusqlite::types::Value::Text(sid.to_string())
+        ]).await
             .map_err(|e| format!("验证失败: {}", e))?;
 
         if rows.is_empty() {
