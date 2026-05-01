@@ -9,12 +9,12 @@
 //! - apimicro 不能以 "dll" 开头
 
 use axum::{
-    body::{Body, Bytes},
+    body::Bytes,
     Router,
     routing::any,
     extract::{Path, Extension, Request},
     response::IntoResponse,
-    http::{header, HeaderMap, StatusCode, Uri, Method},
+    http::{header, StatusCode, Uri, Method},
     middleware,
 };
 use async_trait::async_trait;
@@ -24,6 +24,14 @@ use std::sync::Arc;
 
 use crate::{ApiResponse, UpInfo, RequestBody, Response, VerifyResult, sid_auth_middleware};
 use tower_http::cors::{CorsLayer, Any};
+
+#[derive(Clone, Debug)]
+pub struct ApiPath {
+    pub apisys: String,
+    pub apimicro: String,
+    pub apiobj: String,
+    pub apifun: String,
+}
 
 /// 控制器 Trait - 实现此 trait 来定义 API 处理器
 #[async_trait]
@@ -126,11 +134,12 @@ async fn open_api_handler(
 /// 4级路由处理器 (需要认证)
 async fn api_handler(
     Extension(state): Extension<Arc<RouterState>>,
-    Extension((apisys, apimicro, apiobj, apifun)): Extension<(String, String, String, String)>,
+    Extension(api_path): Extension<ApiPath>,
     Extension(verify_result): Extension<VerifyResult>,
     Extension(mut up): Extension<UpInfo>,
     method: Method,
 ) -> impl IntoResponse {
+    let (apisys, apimicro, apiobj, apifun) = (api_path.apisys, api_path.apimicro, api_path.apiobj, api_path.apifun);
     up.cid = verify_result.cid.clone();
     up.uid = verify_result.uid.clone();
     up.uname = verify_result.uname.clone();
