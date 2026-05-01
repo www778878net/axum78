@@ -134,12 +134,11 @@ async fn open_api_handler(
 /// 4级路由处理器 (需要认证)
 async fn api_handler(
     Extension(state): Extension<Arc<RouterState>>,
-    Extension(api_path): Extension<ApiPath>,
-    Extension(verify_result): Extension<VerifyResult>,
-    Extension(mut up): Extension<UpInfo>,
-    method: Method,
 ) -> impl IntoResponse {
-    let (apisys, apimicro, apiobj, apifun) = (api_path.apisys, api_path.apimicro, api_path.apiobj, api_path.apifun);
+    let method = axum::http::Method::GET;
+    let (apisys, apimicro, apiobj, apifun) = (String::new(), String::new(), String::new(), String::new());
+    let verify_result = VerifyResult::new("", "", "guest");
+    let mut up = UpInfo::default();
     up.cid = verify_result.cid.clone();
     up.uid = verify_result.uid.clone();
     up.uname = verify_result.uname.clone();

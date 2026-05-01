@@ -10,7 +10,7 @@ use axum::{
     middleware::Next,
 };
 use base::{UpInfo, Response as BaseResponse, ProjectPath, MyLogger};
-use crate::{get_lovers_state, LoversDataState, VerifyResult, ApiPath};
+use crate::{get_lovers_state, LoversDataState, VerifyResult};
 use std::collections::HashSet;
 use serde::{Serialize, Deserialize};
 
@@ -240,7 +240,7 @@ pub async fn sid_auth_middleware(
         *builder.uri_mut() = uri;
         builder.extensions_mut().insert(verify_result);
         builder.extensions_mut().insert(up);
-        builder.extensions_mut().insert(ApiPath { apisys, apimicro, apiobj, apifun });
+        builder.extensions_mut().insert((apisys, apimicro, apiobj, apifun));
         return next.run(builder).await;
     }
 
@@ -259,7 +259,7 @@ pub async fn sid_auth_middleware(
     *builder.uri_mut() = uri;
     builder.extensions_mut().insert(verify_result);
     builder.extensions_mut().insert(up);
-    builder.extensions_mut().insert(ApiPath { apisys, apimicro, apiobj, apifun });
+    builder.extensions_mut().insert((apisys, apimicro, apiobj, apifun));
     
     next.run(builder).await
 }
