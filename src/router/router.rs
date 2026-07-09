@@ -126,14 +126,13 @@ async fn open_api_handler(
 /// 4级路由处理器 (需要认证)
 async fn api_handler(
     Extension(state): Extension<Arc<RouterState>>,
-    Extension((apisys, apimicro, apiobj, apifun)): Extension<(String, String, String, String)>,
-    Extension(verify_result): Extension<VerifyResult>,
     Extension(mut up): Extension<UpInfo>,
     method: Method,
 ) -> impl IntoResponse {
-    up.cid = verify_result.cid.clone();
-    up.uid = verify_result.uid.clone();
-    up.uname = verify_result.uname.clone();
+    let apisys = up.apisys.clone();
+    let apimicro = up.apimicro.clone();
+    let apiobj = up.apiobj.clone();
+    let apifun = up.apifun.clone();
 
     if apifun.starts_with('_') {
         return forbidden();

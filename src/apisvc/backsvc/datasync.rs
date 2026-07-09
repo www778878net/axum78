@@ -134,7 +134,7 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
                 rusqlite::types::Value::Text(item.cid.clone()),
                 rusqlite::types::Value::Text(item.upby.clone()),
             ],
-        );
+        ).await;
         batches += 1;
     }
 
