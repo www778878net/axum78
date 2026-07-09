@@ -81,8 +81,6 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
 }
 
 async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
-    let expected_cid = up.cid.clone();
-
     let batch: DatasyncBatch = if let Some(data) = &up.bytedata {
         match DatasyncBatch::decode(&**data) {
             Ok(b) => b,
@@ -133,7 +131,7 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
                 rusqlite::types::Value::Text(item.idrow.clone()),
                 rusqlite::types::Value::Text(item.worker.clone()),
                 rusqlite::types::Value::Text(item.cmdtextmd5.clone()),
-                rusqlite::types::Value::Text(expected_cid.clone()),
+                rusqlite::types::Value::Text(item.cid.clone()),
                 rusqlite::types::Value::Text(item.upby.clone()),
             ],
         );
@@ -214,7 +212,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
 
             println!("[doWork] 处理记录: id={}, tbname={}, action={}, idrow={}", rec_id, tbname, action, idrow);
 
-            let result = process_datasync_item(db, &upby, &tbname, &action, &params_str, &idrow, &datasync_uptime, &cmdtext).await;
+            let result = process_datasync_item(db, &upby, &tbname, &action, &params_str, &idrow, &datasync_uptime, &cmdtext);
             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
             match result {
@@ -245,13 +243,7 @@ async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
 }
 
 async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
-    let expected_cid = if up.sid.is_empty() {
-        String::new()
-    } else if up.sid.contains('|') {
-        up.sid.split('|').next().unwrap_or("").to_string()
-    } else {
-        up.sid.clone()
-    };
+    // cid 已由中间件校验后存入 up.cid
     let expected_worker = if up.sid.contains('|') {
         up.sid.split('|').nth(1).unwrap_or("").to_string()
     } else {
@@ -263,7 +255,7 @@ async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     let limit = up.getnumber as i32;
     let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
         "SELECT * FROM datasync WHERE synced = 1 AND cid = ? AND worker != ? ORDER BY id ASC LIMIT ?",
-        &[&expected_cid as &dyn rusqlite::ToSql, &expected_worker, &limit],
+        &[&up.cid as &dyn rusqlite::ToSql, &expected_worker, &limit],
     ).await {
         Ok(r) => r,
         Err(e) => {
@@ -390,7 +382,7 @@ fn build_record_from_params(columns: &[String], params: Vec<Value>) -> std::coll
     record
 }
 
-async fn process_datasync_item(
+fn process_datasync_item(
     db: &LocalDB,
     _upby: &str,
     tbname: &str,
@@ -402,13 +394,14 @@ async fn process_datasync_item(
 ) -> Result<(), String> {
     // 使用 DataState 通用方法处理所有表
     let datastate = DataState::with_db(tbname, db.clone());
+    let handle = tokio::runtime::Handle::current();
 
     match action {
         "insert" => {
             let columns = parse_columns_from_cmdtext(cmdtext, action)?;
             let params: Vec<Value> = serde_json::from_str(params_str).unwrap_or_default();
             let record = build_record_from_params(&columns, params);
-            datastate.datasync.m_sync_save(&record).await
+            handle.block_on(datastate.datasync.m_sync_save(&record))
                 .map(|_| ())
                 .map_err(|e| e)
         }
@@ -420,12 +413,12 @@ async fn process_datasync_item(
                 .and_then(|v| v.as_str())
                 .unwrap_or(idrow)
                 .to_string();
-            datastate.datasync.m_sync_update(&id, &record).await
+            handle.block_on(datastate.datasync.m_sync_update(&id, &record))
                 .map(|_| ())
                 .map_err(|e| e)
         }
         "delete" => {
-            datastate.datasync.m_sync_del(idrow).await
+            handle.block_on(datastate.datasync.m_sync_del(idrow))
                 .map(|_| ())
                 .map_err(|e| e)
         }

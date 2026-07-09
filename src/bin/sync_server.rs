@@ -1,73 +1,28 @@
-//! axum78 同步服务器 - 精简版
+//! axum78 同步服务器
 //!
-//! 绕过复杂路由系统，直接挂载 datasync/datasync_mysql handler
+//! 运行: cargo run -p axum78 --bin sync_server (需要配 workspace)
+//! 或: cd crates/axum78 && cargo run --bin sync_server
 //!
-//! 运行: cargo run --bin sync_server
+//! 同步机制: 上传datasync记录 -> doWork执行实际操作
 
-use axum::{
-    Router,
-    routing::post,
-    extract::Path,
-    response::IntoResponse,
-    body::Bytes,
-    http::StatusCode,
-};
-use base::UpInfo;
+use axum78::create_router;
 
 #[tokio::main]
 async fn main() {
-    let app = Router::new()
-        .route("/apisvc/backsvc/datasync/:apifun", post(datasync_handler))
-        .route("/apisvc/backsvc/datasync_mysql/:apifun", post(datasync_mysql_handler));
+    let app = create_router();
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8686".to_string());
     let addr = format!("0.0.0.0:{}", port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.expect("绑定端口失败");
 
     tracing_subscriber::fmt::init();
+
     tracing::info!("同步服务器启动: http://{}", addr);
-    tracing::info!("  POST /apisvc/backsvc/datasync/:apifun");
-    tracing::info!("  POST /apisvc/backsvc/datasync_mysql/:apifun");
+    tracing::info!("端点:");
+    tracing::info!("  POST /:apisys/:apimicro/:apiobj/:apifun - 4级路由API");
+    tracing::info!("  POST /apisvc/backsvc/datasync/maddmany - 上传同步记录");
+    tracing::info!("  POST /apisvc/backsvc/datasync/dowork - 执行同步操作");
+    tracing::info!("  POST /apisvc/backsvc/datasync/get - 查询同步记录");
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.expect("绑定端口失败");
     axum::serve(listener, app).await.expect("服务器启动失败");
-}
-
-/// datasync (SQLite) handler
-async fn datasync_handler(
-    Path(apifun): Path<String>,
-    body: Bytes,
-) -> impl IntoResponse {
-    let up: UpInfo = match serde_json::from_slice(&body) {
-        Ok(u) => u,
-        Err(e) => {
-            let resp = base::Response::fail(&format!("解析失败: {}", e), -1);
-            let json = serde_json::to_string(&resp).unwrap_or_default();
-            return (StatusCode::BAD_REQUEST, [(axum::http::header::CONTENT_TYPE, "application/json")], Bytes::from(json));
-        }
-    };
-    let (status, resp_body) = crate::apisvc::backsvc::datasync::handle(&apifun, up).await;
-    (status, [(axum::http::header::CONTENT_TYPE, "application/json")], resp_body)
-}
-
-/// datasync_mysql (MySQL) handler
-async fn datasync_mysql_handler(
-    Path(apifun): Path<String>,
-    body: Bytes,
-) -> impl IntoResponse {
-    let up: UpInfo = match serde_json::from_slice(&body) {
-        Ok(u) => u,
-        Err(e) => {
-            let resp = base::Response::fail(&format!("解析失败: {}", e), -1);
-            let json = serde_json::to_string(&resp).unwrap_or_default();
-            return (StatusCode::BAD_REQUEST, [(axum::http::header::CONTENT_TYPE, "application/json")], Bytes::from(json));
-        }
-    };
-    // datasync_mysql::handle 需要 VerifyResult，从 up 构造（中间件原本会做这件事）
-    let verify_result = crate::VerifyResult {
-        cid: up.cid.clone(),
-        uid: up.uid.clone(),
-        uname: up.uname.clone(),
-    };
-    let (status, resp_body) = crate::apisvc::backsvc::datasync_mysql::handle(&apifun, up, &verify_result).await;
-    (status, [(axum::http::header::CONTENT_TYPE, "application/json")], resp_body)
 }

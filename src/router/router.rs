@@ -156,10 +156,8 @@ async fn api_handler(
     }
 
     let (status, resp_bytes) = match (apisys.to_lowercase().as_str(), apimicro.to_lowercase().as_str(), apiobj.as_str()) {
-        ("apitest", "testmenu", "testtb") => crate::apitest::testmenu::testtb::handle(&apifun, up, &verify_result).await,
         ("apisvc", "backsvc", "datasync") => crate::apisvc::backsvc::datasync::handle(&apifun, up).await,
-        ("apisvc", "backsvc", "datasync_mysql") => crate::apisvc::backsvc::datasync_mysql::handle(&apifun, up, &verify_result).await,
-        ("apigame", "mock", "game_state") => crate::apigame::mock::game_state::handle(&apifun, up).await,
+        // TODO: 其他 handle 暂未修复 async chain 问题
         _ => {
             let resp = Response::fail(&format!("API not found: {}/{}/{}/{}", apisys, apimicro, apiobj, apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
