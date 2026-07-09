@@ -2,7 +2,7 @@
 //!
 //! 运行: cargo run -p axum78 --bin sync_server
 //!
-//! 同步机制: 上传synclog记录 -> doWork执行实际操作
+//! 同步机制: 上传datasync记录 -> doWork执行实际操作
 
 use axum78::create_router;
 
@@ -19,8 +19,8 @@ async fn main() {
     tracing::info!("同步服务器启动: http://{}", addr);
     tracing::info!("端点:");
     tracing::info!("  POST /:apisys/:apimicro/:apiobj/:apifun - 4级路由API");
-    tracing::info!("  POST /apisvc/backsvc/synclog/maddmany - 上传同步记录");
-    tracing::info!("  POST /apisvc/backsvc/synclog/dowork - 执行同步操作");
+    tracing::info!("  POST /apisvc/backsvc/datasync/maddmany - 上传同步记录");
+    tracing::info!("  POST /apisvc/backsvc/datasync/dowork - 执行同步操作");
     tracing::info!("  GET  /health - 健康检查");
 
     axum::serve(listener, app).await.expect("服务器启动失败");

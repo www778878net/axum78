@@ -1,4 +1,4 @@
 pub mod backsvc {
-    pub mod synclog;
-    pub mod synclog_mysql;
+    pub mod datasync;
+    pub mod datasync_mysql;
 }

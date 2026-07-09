@@ -22,8 +22,7 @@ pub struct TableConfig {
     pub tbname: String,
     /// 主键字段 (默认 id)
     pub id_field: String,
-    /// 自增主键 (默认 idpk)
-    pub idpk_field: String,
+    /// 自增主键 (默认 id)
     /// 用户隔离字段 (cid 或 uid)
     pub uidcid: String,
     /// 业务字段列表
@@ -255,14 +254,12 @@ mod tests {
         let config = TableConfig {
             tbname: "test_table".to_string(),
             id_field: "id".to_string(),
-            idpk_field: "idpk".to_string(),
             uidcid: "cid".to_string(),
             cols: vec!["name".to_string(), "value".to_string()],
         };
 
         assert_eq!(config.tbname, "test_table");
         assert_eq!(config.id_field, "id");
-        assert_eq!(config.idpk_field, "idpk");
         assert_eq!(config.uidcid, "cid");
         assert_eq!(config.cols.len(), 2);
     }
@@ -272,14 +269,12 @@ mod tests {
         let config = TableConfig {
             tbname: "test_table".to_string(),
             id_field: "id".to_string(),
-            idpk_field: "idpk".to_string(),
             uidcid: "cid".to_string(),
             cols: vec![],
         };
 
         // 验证默认字段值
         assert_eq!(config.id_field, "id");
-        assert_eq!(config.idpk_field, "idpk");
     }
 
     #[test]

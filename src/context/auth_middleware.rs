@@ -136,7 +136,7 @@ impl Default for MinimalRequest {
             uname: "guest".to_string(),
             getstart: 0,
             getnumber: 15,
-            order: "idpk desc".to_string(),
+            order: "id desc".to_string(),
             bcid: String::new(),
             mid: String::new(),
             jsdata: None,
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(req.uname, "guest");
         assert_eq!(req.getstart, 0);
         assert_eq!(req.getnumber, 15);
-        assert_eq!(req.order, "idpk desc");
+        assert_eq!(req.order, "id desc");
         assert!(req.bcid.is_empty());
         assert!(req.mid.is_empty());
         assert!(req.jsdata.is_none());

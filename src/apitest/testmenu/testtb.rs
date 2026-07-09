@@ -27,7 +27,6 @@ pub struct testtbItem {
     #[prost(string, tag = "1")]
     pub id: String,
     #[prost(int32, tag = "2")]
-    pub idpk: i32,
     #[prost(string, tag = "3")]
     pub cid: String,
     #[prost(string, tag = "4")]
@@ -154,9 +153,6 @@ pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (
         "health" => health().await,
         "get" => get(&up, &mysql, &user_cid).await,
         "test" => test(&up).await,
-        "madd" => m_add(&up, &mysql, &user_cid, &user_uid).await,
-        "mupdate" => m_update(&up, &mysql, &user_cid, &user_uid).await,
-        "clear" => clear(&up, &mysql, &user_cid).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
@@ -186,7 +182,7 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
     let limit = up.getnumber as i32;
 
     // 查询 testtb 表，返回所有数据（按原顺序）
-    let sql = "SELECT * FROM testtb ORDER BY idpk DESC LIMIT ?";
+    let sql = "SELECT * FROM testtb ORDER BY id DESC LIMIT ?";
     let params: Vec<serde_json::Value> = vec![
         serde_json::Value::Number(limit.into())
     ];
@@ -207,7 +203,7 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
         // 只返回当前帐套或 cid 为空的数据
         if cid.is_empty() || cid == expected_cid {
             let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let idpk = row.get("idpk").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let id = row.get("id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let item = row.get("item").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let data = row.get("data").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -216,7 +212,7 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
 
             Some(testtbItem {
                 id,
-                idpk,
+                id,
                 cid,
                 kind,
                 item,
@@ -233,119 +229,4 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
     let bytedata = result.encode_to_vec();
     let resp = Response::success_bytes(bytedata);
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-}
-
-/// M_ADD - 添加数据
-async fn m_add(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str) -> (StatusCode, Bytes) {
-    let pars: &serde_json::Value = up.pars.first().unwrap_or(&serde_json::Value::Null);
-    
-    let pars_map = match pars.as_object() {
-        Some(m) => m,
-        None => {
-            let resp = Response::fail("参数格式错误，需要JSON对象", -1);
-            return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-        }
-    };
-
-    let id = datastate::next_id_string();
-    let cid = pars_map.get("cid").and_then(|v| v.as_str()).unwrap_or(user_cid).to_string();
-    let kind = pars_map.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let item = pars_map.get("item").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let data = pars_map.get("data").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-    let sql = r#"INSERT INTO testtb (id, cid, kind, item, data, upby, uptime) VALUES (?, ?, ?, ?, ?, ?, ?)"#;
-    let params: Vec<serde_json::Value> = vec![
-        serde_json::Value::String(id.clone()),
-        serde_json::Value::String(cid),
-        serde_json::Value::String(kind),
-        serde_json::Value::String(item),
-        serde_json::Value::String(data),
-        serde_json::Value::String(user_uid.to_string()),
-        serde_json::Value::String(now),
-    ];
-
-    let up_info = MysqlUpInfo::new();
-    match mysql.do_m(sql, params, &up_info) {
-        Ok(_) => {
-            let resp = Response::success_json(&serde_json::json!({ "id": id }));
-            (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-        }
-        Err(e) => {
-            let resp = Response::fail(&format!("插入失败: {}", e), -1);
-            (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-        }
-    }
-}
-
-/// M_UPDATE - 更新数据
-async fn m_update(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str) -> (StatusCode, Bytes) {
-    let pars: &serde_json::Value = up.pars.first().unwrap_or(&serde_json::Value::Null);
-    
-    let pars_map = match pars.as_object() {
-        Some(m) => m,
-        None => {
-            let resp = Response::fail("参数格式错误，需要JSON对象", -1);
-            return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-        }
-    };
-
-    let id = pars_map.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if id.is_empty() {
-        let resp = Response::fail("缺少id参数", -1);
-        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-    }
-
-    let kind = pars_map.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let item = pars_map.get("item").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let data = pars_map.get("data").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-    let sql = r#"UPDATE testtb SET kind = ?, item = ?, data = ?, upby = ?, uptime = ? WHERE id = ?"#;
-    let params: Vec<serde_json::Value> = vec![
-        serde_json::Value::String(kind),
-        serde_json::Value::String(item),
-        serde_json::Value::String(data),
-        serde_json::Value::String(user_uid.to_string()),
-        serde_json::Value::String(now),
-        serde_json::Value::String(id.clone()),
-    ];
-
-    let up_info = MysqlUpInfo::new();
-    match mysql.do_m(sql, params, &up_info) {
-        Ok(_) => {
-            let resp = Response::success_json(&serde_json::json!({ "id": id }));
-            (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-        }
-        Err(e) => {
-            let resp = Response::fail(&format!("更新失败: {}", e), -1);
-            (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-        }
-    }
-}
-
-/// CLEAR - 清理测试数据
-async fn clear(up: &UpInfo, mysql: &Mysql78, _user_cid: &str) -> (StatusCode, Bytes) {
-    let prefix = up.pars.first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    if prefix.is_empty() {
-        let resp = Response::success_json(&serde_json::json!({ "deleted": 0 }));
-        return (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-    }
-
-    let sql = format!("DELETE FROM testtb WHERE kind LIKE '{}%'", prefix);
-    let up_info = MysqlUpInfo::new();
-    
-    match mysql.do_m(&sql, vec![], &up_info) {
-        Ok(_) => {
-            let resp = Response::success_json(&serde_json::json!({ "deleted": "ok" }));
-            (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-        }
-        Err(e) => {
-            let resp = Response::fail(&format!("清理失败: {}", e), -1);
-            (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-        }
-    }
 }

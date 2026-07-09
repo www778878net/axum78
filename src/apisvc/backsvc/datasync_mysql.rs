@@ -1,10 +1,10 @@
-//! synclog_mysql API实现 - MySQL 版本
+//! datasync_mysql API实现 - MySQL 版本
 //!
-//! 路径: apisvc/backsvc/synclog_mysql
-//! 路由: POST /apisvc/backsvc/synclog_mysql/:apifun
+//! 路径: apisvc/backsvc/datasync_mysql
+//! 路由: POST /apisvc/backsvc/datasync_mysql/:apifun
 //!
 //! 核心功能：
-//! - m_add_many: 批量添加 synclog 并执行 SQL，返回成功/失败 ID 列表
+//! - m_add_many: 批量添加 datasync 并执行 SQL，返回成功/失败 ID 列表
 //! - get: 获取待同步记录
 //!
 //! 权限控制：
@@ -27,9 +27,9 @@ use std::sync::{Arc, Mutex};
 static MYSQL_POOL: once_cell::sync::Lazy<Arc<Mutex<Option<Arc<Mysql78>>>>> = 
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
-/// synclog 项（与 SQLite 版本共用结构）
+/// datasync 项（与 SQLite 版本共用结构）
 #[derive(Clone, PartialEq, Message, Serialize, Deserialize)]
-pub struct SynclogItem {
+pub struct DatasyncItem {
     #[prost(string, tag = "1")]
     pub id: String,
     #[prost(string, tag = "2")]
@@ -61,9 +61,9 @@ pub struct SynclogItem {
 }
 
 #[derive(Clone, PartialEq, Message)]
-pub struct SynclogBatch {
+pub struct DatasyncBatch {
     #[prost(message, repeated, tag = "1")]
-    pub items: Vec<SynclogItem>,
+    pub items: Vec<DatasyncItem>,
 }
 
 /// 执行结果
@@ -128,7 +128,7 @@ fn get_mysql_config() -> MysqlConfig {
         host: "127.0.0.1".to_string(),
         port: 3306,
         user: "root".to_string(),
-        password: "root123".to_string(),
+        password: String::new(),
         database: "testdb".to_string(),
         max_connections: 10,
         is_log: false,
@@ -175,7 +175,6 @@ pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (
     
     match apifun.to_lowercase().as_str() {
         "maddmany" => m_add_many(&up, &mysql, &user_cid, &user_uid).await,
-        "dowork" => do_work(&up, &mysql, &user_cid).await,
         "get" => get(&up, &mysql, &user_cid).await,
         "getbyworker" => get_by_worker(&up, &mysql, &user_cid).await,
         _ => {
@@ -185,9 +184,10 @@ pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (
     }
 }
 
-/// 批量添加 synclog（只保存，不执行 SQL）
-async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, _user_uid: &str) -> (StatusCode, Bytes) {
-    let batch: SynclogBatch = match decode_batch(up) {
+/// 批量添加 datasync 并执行 SQL
+async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str) -> (StatusCode, Bytes) {
+    // 解码请求数据
+    let batch: DatasyncBatch = match decode_batch(up) {
         Ok(b) => b,
         Err(e) => {
             let resp = Response::fail(&e, -1);
@@ -195,235 +195,80 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, _user_uid: &st
         }
     };
 
-    if let Err(e) = ensure_synclog_table(mysql) {
-        let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
+    // 确保 datasync 表存在
+    if let Err(e) = ensure_datasync_table(mysql) {
+        let resp = Response::fail(&format!("创建datasync表失败: {}", e), -1);
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
+    // 管理员帐套不需要验证
+    let admin_cid = "d4856531-e9d3-20f3-4c22-fe3c65fb009c";
+    let is_admin = user_cid == admin_cid;
+
+    let mut success_ids: Vec<String> = Vec::new();
+    let mut failed: Vec<FailedItem> = Vec::new();
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let mut batches = 0;
 
     for item in batch.items {
-        let id = if item.id.is_empty() {
-            datastate::next_id_string()
-        } else {
-            item.id.clone()
+        let id = if item.id.is_empty() { 
+            datastate::next_id_string() 
+        } else { 
+            item.id.clone() 
         };
 
-        let sql = r#"INSERT INTO synclog
-            (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, lasterrinfo, cmdtextmd5, cid, upby, uptime)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?, ?)"#;
-
-        let params: Vec<Value> = vec![
-            Value::String(id),
-            Value::String(item.apisys),
-            Value::String(item.apimicro),
-            Value::String(item.apiobj),
-            Value::String(item.tbname),
-            Value::String(item.action),
-            Value::String(item.cmdtext),
-            Value::String(item.params),
-            Value::String(item.idrow),
-            Value::String(item.worker),
-            Value::String(item.cmdtextmd5),
-            Value::String(user_cid.to_string()),
-            Value::String(item.upby),
-            Value::String(now.clone()),
-        ];
-
-        let up_info = datastate::MysqlUpInfo::new();
-        if let Err(e) = mysql.do_m(sql, params, &up_info) {
-            eprintln!("[m_add_many] 插入失败: {}", e);
-        } else {
-            batches += 1;
+        // 权限验证（管理员跳过）
+        if !is_admin {
+            let validation = validate_cid_uid(mysql, &item, user_cid, user_uid);
+            if let Err(e) = validation {
+                failed.push(FailedItem {
+                    id: id.clone(),
+                    idrow: item.idrow.clone(),
+                    error: e,
+                });
+                continue;
+            }
         }
-    }
 
-    let resp = Response::success_json(&serde_json::json!({ "batches": batches }));
-    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-}
-
-/// 执行待处理的 synclog 记录
-async fn do_work(up: &UpInfo, mysql: &Mysql78, _user_cid: &str) -> (StatusCode, Bytes) {
-    let data = match up.parse_prefixed_data() {
-        Ok(d) => d,
-        Err(_) => {
-            let resp = Response::fail("数据解析失败", -1);
-            return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-        }
-    };
-
-    let worker = data.get("worker")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    if worker.is_empty() {
-        let resp = Response::fail("worker参数为空", -1);
-        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-    }
-
-    if let Err(e) = ensure_synclog_table(mysql) {
-        let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-    }
-
-    let limit = 100;
-    let max_batches = 10;
-    let mut total_processed = 0i32;
-    let mut batch_count = 0i32;
-
-    for _ in 0..max_batches {
-        let sql = "SELECT * FROM synclog WHERE synced = 0 AND worker = ? ORDER BY idpk ASC LIMIT ?";
-        let params: Vec<Value> = vec![
-            Value::String(worker.clone()),
-            Value::Number(limit.into()),
-        ];
-
-        let up_info = datastate::MysqlUpInfo::new();
-        let rows = match mysql.do_get(sql, params, &up_info) {
-            Ok(r) => r,
+        // 执行 SQL
+        let exec_result = execute_datasync_item(mysql, &item, user_cid, &now);
+        
+        match exec_result {
+            Ok(_) => {
+                // 写入 datasync 成功记录
+                let _ = insert_datasync(mysql, &item, &id, user_cid, 1, "", &now, &up.uname);
+                success_ids.push(id);
+            }
             Err(e) => {
-                eprintln!("[do_work] 查询失败: {}", e);
-                break;
-            }
-        };
-
-        if rows.is_empty() {
-            break;
-        }
-
-        batch_count += 1;
-        println!("[do_work] 批次 {} 处理 {} 条记录", batch_count, rows.len());
-
-        for row in rows {
-            let idpk = row.get("idpk").and_then(|v| v.as_i64()).unwrap_or(0);
-            let tbname = row.get("tbname").and_then(|v| v.as_str()).unwrap_or("");
-            let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("");
-            let params_str = match row.get("params") {
-                Some(Value::String(s)) => s.clone(),
-                Some(v @ Value::Array(_)) => serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()),
-                _ => "[]".to_string(),
-            };
-            let cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("");
-            let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("");
-            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-            let result = execute_synclog_action(mysql, action, cmdtext, &params_str);
-
-            match result {
-                Ok(_) => {
-                    println!("[do_work] 处理成功: idpk={}", idpk);
-                    let update_sql = "UPDATE synclog SET synced = 1, lasterrinfo = '', uptime = ? WHERE idpk = ?";
-                    let update_params: Vec<Value> = vec![
-                        Value::String(now),
-                        Value::Number(idpk.into()),
-                    ];
-                    let _ = mysql.do_m(update_sql, update_params, &up_info);
-                    total_processed += 1;
-                }
-                Err(e) => {
-                    println!("[do_work] 处理失败: idpk={}, error={}", idpk, e);
-                    let update_sql = "UPDATE synclog SET synced = -1, lasterrinfo = ?, uptime = ? WHERE idpk = ?";
-                    let update_params: Vec<Value> = vec![
-                        Value::String(e.clone()),
-                        Value::String(now),
-                        Value::Number(idpk.into()),
-                    ];
-                    let _ = mysql.do_m(update_sql, update_params, &up_info);
-                }
+                // 写入 datasync 失败记录
+                let _ = insert_datasync(mysql, &item, &id, user_cid, -1, &e, &now, &up.uname);
+                failed.push(FailedItem {
+                    id: id.clone(),
+                    idrow: item.idrow.clone(),
+                    error: e,
+                });
             }
         }
     }
 
-    let resp = Response::success_json(&serde_json::json!({
-        "processed": total_processed,
-        "batches": batch_count,
-    }));
+    let result = ExecutionResult { success_ids, failed };
+    let resp = Response::success_json(&serde_json::to_value(result).unwrap_or_default());
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-}
-
-/// 执行单条 synclog SQL 操作
-fn execute_synclog_action(mysql: &Mysql78, action: &str, cmdtext: &str, params_str: &str) -> Result<(), String> {
-    let params: Vec<Value> = serde_json::from_str(params_str).unwrap_or_default();
-    let up_info = datastate::MysqlUpInfo::new();
-
-    match action {
-        "insert" | "update" | "delete" => {
-            let result = mysql.do_m(cmdtext, params, &up_info);
-            match result {
-                Ok(r) if r.error.is_none() => Ok(()),
-                Ok(r) => Err(r.error.unwrap_or_else(|| "操作失败".to_string())),
-                Err(e) => Err(e),
-            }
-        }
-        _ => Err(format!("未知的action: {}", action)),
-    }
 }
 
 /// 解码批量数据
-fn decode_batch(up: &UpInfo) -> Result<SynclogBatch, String> {
+fn decode_batch(up: &UpInfo) -> Result<DatasyncBatch, String> {
     if let Some(data) = &up.bytedata {
-        if data.len() >= 8 {
-            let first_byte = data[0];
-            let content = &data[8..];
-            match first_byte {
-                0 => {
-                    SynclogBatch::decode(content)
-                        .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
-                }
-                1 => {
-                    let json_str = String::from_utf8_lossy(content);
-                    let items: Vec<SynclogItem> = serde_json::from_str(&json_str)
-                        .map_err(|e| format!("[SYNCLOG_V2] JSON解码失败: {}", e))?;
-                    Ok(SynclogBatch { items })
-                }
-                _ => {
-                    SynclogBatch::decode(&**data)
-                        .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
-                }
-            }
-        } else {
-            SynclogBatch::decode(&**data)
-                .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
-        }
+        DatasyncBatch::decode(&**data)
+            .map_err(|e| format!("Protobuf解码失败: {}", e))
     } else if let Some(jsdata) = &up.jsdata {
-        if jsdata.len() >= 8 {
-            let first_char = jsdata.chars().next().unwrap_or(' ');
-            let content = &jsdata[8..];
-            match first_char {
-                '0' => {
-                    use base64::{Engine as _, engine::general_purpose};
-                    let bytes = general_purpose::STANDARD
-                        .decode(content)
-                        .map_err(|e| format!("[SYNCLOG_V2] Base64解码失败(0): {}", e))?;
-                    SynclogBatch::decode(&*bytes)
-                        .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
-                }
-                '1' => {
-                    let items: Vec<SynclogItem> = serde_json::from_str(content)
-                        .map_err(|e| format!("[SYNCLOG_V2] JSON解码失败(1): {}, content={}", e, &content[..content.len().min(100)]))?;
-                    Ok(SynclogBatch { items })
-                }
-                _ => {
-                    use base64::{Engine as _, engine::general_purpose};
-                    let bytes = general_purpose::STANDARD
-                        .decode(jsdata)
-                        .map_err(|e| format!("[SYNCLOG_V2] Base64解码失败(_): first_char='{}' ({}), jsdata={}", first_char, first_char as u32, &jsdata[..jsdata.len().min(50)]))?;
-                    SynclogBatch::decode(&*bytes)
-                        .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
-                }
-            }
-        } else {
-            use base64::{Engine as _, engine::general_purpose};
-            let bytes = general_purpose::STANDARD
-                .decode(jsdata)
-                .map_err(|e| format!("[SYNCLOG_V2] Base64解码失败(short): {}", e))?;
-            SynclogBatch::decode(&*bytes)
-                .map_err(|e| format!("[SYNCLOG_V2] Protobuf解码失败: {}", e))
-        }
+        use base64::{Engine as _, engine::general_purpose};
+        let bytes = general_purpose::STANDARD
+            .decode(jsdata)
+            .map_err(|e| format!("Base64解码失败: {}", e))?;
+        DatasyncBatch::decode(&*bytes)
+            .map_err(|e| format!("Protobuf解码失败: {}", e))
     } else {
-        Err("[SYNCLOG_V2] 无bytedata或jsdata".to_string())
+        Err("无bytedata或jsdata".to_string())
     }
 }
 
@@ -433,7 +278,7 @@ fn decode_batch(up: &UpInfo) -> Result<SynclogBatch, String> {
 /// 3. update/delete 时查表验证
 fn validate_cid_uid(
     mysql: &Mysql78,
-    item: &SynclogItem,
+    item: &DatasyncItem,
     user_cid: &str,
     user_uid: &str,
 ) -> Result<(), String> {
@@ -502,10 +347,10 @@ fn extract_columns_from_insert(cmdtext: &str) -> Option<String> {
     Some(caps[2].to_string())
 }
 
-/// 执行单条 synclog SQL
-fn execute_synclog_item(
+/// 执行单条 datasync SQL
+fn execute_datasync_item(
     mysql: &Mysql78, 
-    item: &SynclogItem, 
+    item: &DatasyncItem, 
     _cid: &str,
     _now: &str,
 ) -> Result<(), String> {
@@ -548,10 +393,10 @@ fn execute_synclog_item(
     }
 }
 
-/// 插入 synclog 记录
-fn insert_synclog(
+/// 插入 datasync 记录
+fn insert_datasync(
     mysql: &Mysql78,
-    item: &SynclogItem,
+    item: &DatasyncItem,
     id: &str,
     cid: &str,
     synced: i32,
@@ -559,7 +404,7 @@ fn insert_synclog(
     uptime: &str,
     uname: &str,
 ) -> Result<(), String> {
-    let sql = r#"INSERT INTO synclog 
+    let sql = r#"INSERT INTO datasync 
         (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, lasterrinfo, cmdtextmd5, cid, upby, uptime) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#;
     
@@ -586,7 +431,7 @@ fn insert_synclog(
     let result = mysql.do_m_add(sql, params, &up);
     match result {
         Ok(r) if r.error.is_none() => Ok(()),
-        Ok(r) => Err(r.error.unwrap_or_else(|| "插入synclog失败".to_string())),
+        Ok(r) => Err(r.error.unwrap_or_else(|| "插入datasync失败".to_string())),
         Err(e) => Err(e),
     }
 }
@@ -596,13 +441,13 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
     let limit = up.getnumber as i32;
 
     // 确保表存在
-    if let Err(e) = ensure_synclog_table(mysql) {
-        let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
+    if let Err(e) = ensure_datasync_table(mysql) {
+        let resp = Response::fail(&format!("创建datasync表失败: {}", e), -1);
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
     // 查询 synced=1（已同步到服务器）的记录
-    let sql = "SELECT * FROM synclog WHERE synced = 1 AND cid = ? ORDER BY idpk ASC LIMIT ?";
+    let sql = "SELECT * FROM datasync WHERE synced = 1 AND cid = ? ORDER BY id ASC LIMIT ?";
     let params: Vec<Value> = vec![
         Value::String(expected_cid.to_string()),
         Value::Number(limit.into()),
@@ -617,8 +462,8 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
         }
     };
 
-    // 构建 SynclogItem，对于业务数据需要查询实际表内容
-    let mut items: Vec<SynclogItem> = Vec::new();
+    // 构建 DatasyncItem，对于业务数据需要查询实际表内容
+    let mut items: Vec<DatasyncItem> = Vec::new();
 
     for row in rows {
         let tbname = row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -662,11 +507,11 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
             cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
         }
 
-        items.push(SynclogItem {
+        items.push(DatasyncItem {
             id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             apisys: row.get("apisys").and_then(|v| v.as_str()).unwrap_or("v1").to_string(),
             apimicro: row.get("apimicro").and_then(|v| v.as_str()).unwrap_or("iflow").to_string(),
-            apiobj: row.get("apiobj").and_then(|v| v.as_str()).unwrap_or("synclog").to_string(),
+            apiobj: row.get("apiobj").and_then(|v| v.as_str()).unwrap_or("datasync").to_string(),
             tbname,
             action,
             cmdtext,
@@ -680,7 +525,7 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
         });
     }
 
-    let batch = SynclogBatch { items };
+    let batch = DatasyncBatch { items };
     let bytedata = batch.encode_to_vec();
     use base64::{Engine as _, engine::general_purpose};
     let bytedata_base64 = general_purpose::STANDARD.encode(&bytedata);
@@ -690,45 +535,37 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
 }
 
 /// 获取其他客户端的变更记录（过滤本地worker）
-/// 使用idpk作为serverid，实现增量同步
+/// 使用雪花id作为增量同步的serverId
 /// 配合5秒安全水位线策略，解决分布式系统时序问题
-async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, _expected_cid: &str) -> (StatusCode, Bytes) {
+async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, Bytes) {
     let limit = up.getnumber as i32;
 
-    let data = match up.parse_prefixed_data() {
-        Ok(d) => d,
-        Err(_) => {
-            let resp = Response::fail("数据解析失败", -1);
-            return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-        }
+    // 从SID中提取worker（格式：cid|worker）
+    let expected_worker = if up.sid.contains('|') {
+        up.sid.split('|').nth(1).unwrap_or("").to_string()
+    } else {
+        String::new()
     };
 
-    let worker = data.get("worker")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let last_server_id = data.get("lastServerId")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    // 获取客户端传递的最后serverid（雪花id），首次同步传 "0"
+    let last_server_id = if up.mid > 0 { up.mid.to_string() } else { "0".to_string() };
 
-    if worker.is_empty() {
-        let resp = Response::fail("worker参数为空", -1);
-        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-    }
-
-    if let Err(e) = ensure_synclog_table(mysql) {
-        let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
+    // 确保表存在
+    if let Err(e) = ensure_datasync_table(mysql) {
+        let resp = Response::fail(&format!("创建datasync表失败: {}", e), -1);
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
+    // 5秒安全水位线
     let safe_interval_secs = 5;
     let max_uptime = chrono::Local::now() - chrono::Duration::seconds(safe_interval_secs);
     let max_uptime_str = max_uptime.format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let sql = "SELECT * FROM synclog WHERE synced = 1 AND worker != ? AND idpk > ? AND uptime <= ? ORDER BY idpk ASC LIMIT ?";
+    // 查询 synced=1 且 worker != 本地worker 且 id > lastServerId 且 uptime <= max_uptime 的记录
+    let sql = "SELECT * FROM datasync WHERE synced = 1 AND worker != ? AND id > ? AND uptime <= ? ORDER BY id ASC LIMIT ?";
     let params: Vec<Value> = vec![
-        Value::String(worker),
-        Value::Number(last_server_id.into()),
+        Value::String(expected_worker),
+        Value::String(last_server_id),
         Value::String(max_uptime_str),
         Value::Number(limit.into()),
     ];
@@ -742,8 +579,8 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, _expected_cid: &str) -> (St
         }
     };
 
-    // 构建 SynclogItem，对于业务数据需要查询实际表内容
-    let mut items: Vec<SynclogItem> = Vec::new();
+    // 构建 DatasyncItem，对于业务数据需要查询实际表内容
+    let mut items: Vec<DatasyncItem> = Vec::new();
 
     for row in rows {
         let tbname = row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -787,11 +624,11 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, _expected_cid: &str) -> (St
             cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
         }
 
-        items.push(SynclogItem {
+        items.push(DatasyncItem {
             id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             apisys: row.get("apisys").and_then(|v| v.as_str()).unwrap_or("v1").to_string(),
             apimicro: row.get("apimicro").and_then(|v| v.as_str()).unwrap_or("iflow").to_string(),
-            apiobj: row.get("apiobj").and_then(|v| v.as_str()).unwrap_or("synclog").to_string(),
+            apiobj: row.get("apiobj").and_then(|v| v.as_str()).unwrap_or("datasync").to_string(),
             tbname,
             action,
             cmdtext,
@@ -805,7 +642,7 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, _expected_cid: &str) -> (St
         });
     }
 
-    let batch = SynclogBatch { items };
+    let batch = DatasyncBatch { items };
     let bytedata = batch.encode_to_vec();
     use base64::{Engine as _, engine::general_purpose};
     let bytedata_base64 = general_purpose::STANDARD.encode(&bytedata);
@@ -814,14 +651,13 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, _expected_cid: &str) -> (St
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
-/// 确保 synclog 表存在
-fn ensure_synclog_table(mysql: &Mysql78) -> Result<(), String> {
-    let sql = r#"CREATE TABLE IF NOT EXISTS synclog (
-        idpk INT AUTO_INCREMENT PRIMARY KEY,
-        id VARCHAR(64) NOT NULL UNIQUE,
+/// 确保 datasync 表存在
+fn ensure_datasync_table(mysql: &Mysql78) -> Result<(), String> {
+    let sql = r#"CREATE TABLE IF NOT EXISTS datasync (
+        id VARCHAR(64) PRIMARY KEY,
         apisys VARCHAR(50) NOT NULL DEFAULT 'v1',
         apimicro VARCHAR(50) NOT NULL DEFAULT 'iflow',
-        apiobj VARCHAR(50) NOT NULL DEFAULT 'synclog',
+        apiobj VARCHAR(50) NOT NULL DEFAULT 'datasync',
         tbname VARCHAR(100) NOT NULL DEFAULT '',
         action VARCHAR(20) NOT NULL DEFAULT '',
         cmdtext TEXT NOT NULL,
@@ -841,5 +677,5 @@ fn ensure_synclog_table(mysql: &Mysql78) -> Result<(), String> {
     let up = datastate::MysqlUpInfo::new();
     mysql.do_m(sql, vec![], &up)
         .map(|_| ())
-        .map_err(|e| format!("创建synclog表失败: {}", e))
+        .map_err(|e| format!("创建datasync表失败: {}", e))
 }

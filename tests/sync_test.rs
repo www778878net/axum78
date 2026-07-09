@@ -1,31 +1,23 @@
-//! 多端同步测试 - MySQL 版本
+//! 多端同步测试
 //!
 //! 测试方案：
-//! 1. 单向下载测试：MySQL 数据下载到本地 SQLite
-//! 2. 客户端变更同步：添加2条、修改2条、删除2条，上传synclog，预期 MySQL 一致
-//! 3. 服务器变更同步：MySQL 添加/修改/删除各2条，预期客户端同步后一致
-//! 4. 最终一致性验证：客户端和 MySQL 数据完全一致
-//! 5. 冲突测试：双边同时修改，验证时间戳优先策略
-//!
-//! MySQL 唯一键约束：u_kind_item (cid, kind, item)
+//! 1. 单向下载测试：清空表testtb，服务器数据下载到本地
+//! 2. 客户端变更同步：添加2条、修改2条、删除2条，上传datasync，预期服务器一致
+//! 3. 服务器变更同步：服务器添加/修改/删除各2条，预期客户端同步后一致
+//! 4. 最后客户端和服务器testtb表一致
 
 use base::UpInfo;
 use base64::Engine;
-use chrono;
 use datastate::datastate::TestTb;
 use datastate::next_id_string;
 use prost::Message;
-use axum78::apitest::testmenu::testtb::{testtb, testtbItem};
-use axum78::apisvc::backsvc::synclog::{SynclogItem, SynclogBatch};
+use axum78::apitest::testmenu::testtb::{testtb, testtbItem}; use axum78::apisvc::backsvc::datasync::{DatasyncItem, DatasyncBatch};
+
 
 const SERVER_URL: &str = "http://127.0.0.1:3780";
 const CID: &str = "test-cid-789";
 const WORKER_A: &str = "worker-A";
 const WORKER_B: &str = "worker-B";
-
-fn get_test_prefix() -> String {
-    chrono::Local::now().format("test_%Y%m%d_%H%M%S_").to_string()
-}
 
 async fn download_from_server(sid: &str) -> Result<Vec<testtbItem>, String> {
     let client = reqwest::Client::new();
@@ -45,86 +37,38 @@ async fn download_from_server(sid: &str) -> Result<Vec<testtbItem>, String> {
         return Err(json.get("errmsg").and_then(|v| v.as_str()).unwrap_or("未知错误").to_string());
     }
     
-    let bytedata = json.get("bytedata").and_then(|v| v.as_array()).ok_or_else(|| {
-        "无bytedata".to_string()
-    })?;
-    let bytes: Vec<u8> = bytedata.iter()
-        .filter_map(|v| v.as_i64().map(|n| (n & 0xFF) as u8))
-        .collect();
+    // 打印服务器返回的原始数据
+    println!("服务器返回的JSON: {:?}", json);
+    
+    let bytedata = json.get("bytedata").and_then(|v| v.as_array()).ok_or("无bytedata")?;
+    let bytes: Vec<u8> = bytedata.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect();
+    println!("bytedata长度: {} bytes", bytes.len());
     
     let result = testtb::decode(&*bytes).map_err(|e| e.to_string())?;
+    println!("解码后的items数量: {}", result.items.len());
+    for item in &result.items {
+        println!("解码后: id={}, kind={}", item.id, item.kind);
+    }
+    
     Ok(result.items)
 }
 
-fn read_local_synclog(_testtb: &TestTb) -> Vec<SynclogItem> {
-    let project_path = base::ProjectPath::find().expect("查找项目路径失败");
-    let db_path = project_path.local_db();
-    let db = datastate::LocalDB::with_path(&db_path.to_string_lossy()).expect("创建数据库失败");
-    
-    let today = chrono::Local::now().format("%Y%m%d").to_string();
-    let synclog_table = format!("synclog_{}", today);
-    
-    let check_sql = format!("SELECT name FROM sqlite_master WHERE type='table' AND name='{}'", synclog_table);
-    let table_exists = match db.query(&check_sql, &[]) {
-        Ok(rows) => !rows.is_empty(),
-        Err(_) => false,
-    };
-    
-    if !table_exists {
-        let check_simple_sql = "SELECT name FROM sqlite_master WHERE type='table' AND name='synclog'";
-        let simple_table_exists = match db.query(check_simple_sql, &[]) {
-            Ok(rows) => !rows.is_empty(),
-            Err(_) => false,
-        };
-        
-        if !simple_table_exists {
-            return Vec::new();
-        }
-        
-        let sql = "SELECT id, tbname, action, cmdtext, params, idrow, worker, cid, upby FROM synclog WHERE tbname = 'testtb' AND synced = 0 ORDER BY id";
-        let rows = match db.query(sql, &[]) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
-        
-        return rows.iter().map(|row| {
-            SynclogItem {
-                id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                apisys: "v1".to_string(),
-                apimicro: "iflow".to_string(),
-                apiobj: "synclog".to_string(),
-                tbname: row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                action: row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                cmdtext: row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                params: row.get("params").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                idrow: row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                worker: WORKER_A.to_string(),
-                synced: 0,
-                cmdtextmd5: String::new(),
-                cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                upby: row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            }
-        }).collect();
-    }
-    
-    let sql = format!("SELECT id, tbname, action, cmdtext, params, idrow, worker, cid, upby FROM {} WHERE tbname = 'testtb' AND synced = 0 ORDER BY id", synclog_table);
-    let rows = match db.query(&sql, &[]) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
+fn read_local_datasync(testtb: &TestTb) -> Vec<DatasyncItem> {
+    let sql = "SELECT id, tbname, action, params, idrow, worker, cid, upby FROM datasync WHERE tbname = 'testtb' AND synced = 0 ORDER BY id";
+    let rows = testtb.db.query(sql, &[]).unwrap();
     
     rows.iter().map(|row| {
-        SynclogItem {
+        DatasyncItem {
             id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             apisys: "v1".to_string(),
             apimicro: "iflow".to_string(),
-            apiobj: "synclog".to_string(),
+            apiobj: "datasync".to_string(),
             tbname: row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             action: row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            cmdtext: row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            cmdtext: String::new(),
             params: row.get("params").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             idrow: row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            worker: WORKER_A.to_string(),
+            worker: row.get("worker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             synced: 0,
             cmdtextmd5: String::new(),
             cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -133,19 +77,46 @@ fn read_local_synclog(_testtb: &TestTb) -> Vec<SynclogItem> {
     }).collect()
 }
 
-async fn upload_synclog(sid: &str, items: Vec<SynclogItem>) -> Result<i32, String> {
-    let client = reqwest::Client::new();
-    let batch = SynclogBatch { items };
-    let bytedata = batch.encode_to_vec();
+fn read_remote_datasync(testtb: &TestTb) -> Vec<DatasyncItem> {
+    let sql = "SELECT id, tbname, action, params, idrow, worker, cid, upby FROM datasync WHERE tbname = 'testtb' AND synced = 0 ORDER BY id";
+    let rows = testtb.db.query(sql, &[]).unwrap();
     
-    let body = serde_json::json!({
+    rows.iter().map(|row| {
+        DatasyncItem {
+            id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            apisys: "v1".to_string(),
+            apimicro: "iflow".to_string(),
+            apiobj: "datasync".to_string(),
+            tbname: row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            action: row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            cmdtext: String::new(),
+            params: row.get("params").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            idrow: row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            worker: row.get("worker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            synced: 0,
+            cmdtextmd5: String::new(),
+            cid: row.get("cid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            upby: row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        }
+    }).collect()
+}
+
+async fn upload_datasync(sid: &str, items: Vec<DatasyncItem>) -> Result<i32, String> {
+    use base64::{Engine as _, engine::general_purpose};
+    
+    let client = reqwest::Client::new();
+    let batch = DatasyncBatch { items };
+    let bytedata = batch.encode_to_vec();
+    let bytedata_base64 = general_purpose::STANDARD.encode(&bytedata);
+    
+    let up = serde_json::json!({
         "sid": sid,
-        "bytedata": bytedata.iter().map(|b| *b as i64).collect::<Vec<i64>>()
+        "jsdata": bytedata_base64
     });
-    let body = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    let body = serde_json::to_string(&up).map_err(|e| e.to_string())?;
     
     let resp = client
-        .post(format!("{}/apisvc/backsvc/synclog_mysql/maddmany", SERVER_URL))
+        .post(format!("{}/apisvc/backsvc/datasync/maddmany", SERVER_URL))
         .header("Content-Type", "application/json")
         .body(body)
         .send()
@@ -158,25 +129,17 @@ async fn upload_synclog(sid: &str, items: Vec<SynclogItem>) -> Result<i32, Strin
         return Err(json.get("errmsg").and_then(|v| v.as_str()).unwrap_or("未知错误").to_string());
     }
     
-    let jsdata_str = json.get("back").and_then(|v| v.as_str()).ok_or("无back字段")?;
-    let jsdata: serde_json::Value = serde_json::from_str(jsdata_str).map_err(|e| e.to_string())?;
+    let jsdata_str = json.get("jsdata").and_then(|v| v.as_str()).unwrap();
+    let jsdata: serde_json::Value = serde_json::from_str(jsdata_str).unwrap();
     Ok(jsdata.get("batches").and_then(|v| v.as_i64()).unwrap_or(0) as i32)
 }
 
-async fn do_work(sid: &str, worker: &str) -> Result<(i32, i32), String> {
+async fn do_work() -> Result<(i32, i32), String> {
     let client = reqwest::Client::new();
-    let worker_json = serde_json::json!({"worker": worker}).to_string();
-    let mut bytedata = vec![0x01u8; 8];
-    bytedata.extend_from_slice(worker_json.as_bytes());
-    
-    let body = serde_json::json!({
-        "sid": sid,
-        "bytedata": bytedata.iter().map(|b| *b as i64).collect::<Vec<i64>>()
-    });
-    let body = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    let body = serde_json::json!({"sid": "test"}).to_string();
     
     let resp = client
-        .post(format!("{}/apisvc/backsvc/synclog_mysql/dowork", SERVER_URL))
+        .post(format!("{}/apisvc/backsvc/datasync/dowork", SERVER_URL))
         .header("Content-Type", "application/json")
         .body(body)
         .send()
@@ -189,168 +152,142 @@ async fn do_work(sid: &str, worker: &str) -> Result<(i32, i32), String> {
         return Err(json.get("errmsg").and_then(|v| v.as_str()).unwrap_or("未知错误").to_string());
     }
     
-    let back_str = json.get("back").and_then(|v| v.as_str()).ok_or("无back字段")?;
-    let jsdata: serde_json::Value = serde_json::from_str(back_str).map_err(|e| e.to_string())?;
+    let jsdata = json.get("jsdata").ok_or("无jsdata")?;
     Ok((
         jsdata.get("processed").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         jsdata.get("batches").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
     ))
 }
 
-async fn get_synclog_by_worker(sid: &str, worker: &str, limit: i32) -> Result<Vec<SynclogItem>, String> {
-    let client = reqwest::Client::new();
-    let worker_json = serde_json::json!({"worker": worker}).to_string();
-    let mut bytedata = vec![0x01u8; 8];
-    bytedata.extend_from_slice(worker_json.as_bytes());
-    
-    let body = serde_json::json!({
-        "sid": sid,
-        "getnumber": limit,
-        "bytedata": bytedata.iter().map(|b| *b as i64).collect::<Vec<i64>>()
-    }).to_string();
-    
-    let resp = client
-        .post(format!("{}/apisvc/backsvc/synclog_mysql/getbyworker", SERVER_URL))
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let res = json.get("res").and_then(|v| v.as_i64()).unwrap_or(-1);
-    if res != 0 {
-        return Err(json.get("errmsg").and_then(|v| v.as_str()).unwrap_or("未知错误").to_string());
-    }
-    
-    let back_str = json.get("back").and_then(|v| v.as_str()).ok_or("无back字段")?;
-    let back_data: serde_json::Value = serde_json::from_str(back_str).map_err(|e| e.to_string())?;
-    let bytedata_base64 = back_data.get("bytedata").and_then(|v| v.as_str()).ok_or("无bytedata")?;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(bytedata_base64.as_bytes()).map_err(|e| e.to_string())?;
-    
-    let synclog_batch = SynclogBatch::decode(&*bytes).map_err(|e| e.to_string())?;
-    Ok(synclog_batch.items)
-}
-
-async fn clear_mysql_testtb(sid: &str, prefix: &str) -> Result<(), String> {
-    let client = reqwest::Client::new();
-    let body = serde_json::json!({
-        "sid": sid,
-        "pars": vec![prefix]
-    }).to_string();
-    
-    let resp = client
-        .post(format!("{}/apitest/testmenu/testtb/clear", SERVER_URL))
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    
-    let _json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 #[tokio::test]
 async fn test_all_plans() {
-    println!("\n========== 多端同步测试 (MySQL 版本) ==========");
+    println!("\n========== 多端同步测试 ==========");
 
     let sid = format!("{}|{}", CID, WORKER_A);
     let _up = UpInfo::new();
-    let test_prefix = get_test_prefix();
-    println!("测试数据前缀: {}", test_prefix);
 
+    // 初始化默认数据库中的 lovers 和 lovers_auth 表（用于 SID 验证）
     let default_db = datastate::LocalDB::default_instance().expect("获取默认数据库失败");
     let _ = default_db.execute(axum78::LOVERS_CREATE_SQL);
     let _ = default_db.execute(axum78::LOVERS_AUTH_CREATE_SQL);
 
+    // 插入测试用户
     let test_user_id = datastate::next_id_string();
     let _ = default_db.execute_with_params(
         "INSERT OR REPLACE INTO lovers (id, uname, idcodef, cid, uid) VALUES (?, ?, ?, ?, ?)",
         &[&test_user_id as &dyn rusqlite::ToSql, &"test_user", &CID, &CID, &"test_uid"],
     );
 
+    // 插入测试会话（SID 格式: CID|worker）
     let _ = default_db.execute_with_params(
-        "INSERT OR REPLACE INTO lovers_auth (ikuser, sid) VALUES ((SELECT idpk FROM lovers WHERE id = ?), ?)",
+        "INSERT OR REPLACE INTO lovers_auth (ikuser, sid) VALUES ((SELECT id FROM lovers WHERE id = ?), ?)",
         &[&test_user_id as &dyn rusqlite::ToSql, &sid],
     );
     println!("默认数据库: 已初始化 lovers 和 lovers_auth 表");
 
-    let project_path = base::ProjectPath::find().expect("查找项目路径失败");
-    let local_db_path = project_path.local_db().to_string_lossy().to_string();
-    println!("客户端数据库路径: {}", local_db_path);
-    let local_testtb = TestTb::with_db_path(&local_db_path);
+    // 远程数据库路径（服务器端）
+    let remote_db_path = "docs/config/remote.db";
+
+    // 删除旧表并重新创建（远程数据库）
+    let remote_testtb = TestTb::with_db_path(remote_db_path);
+    let _ = remote_testtb.db.execute("DROP TABLE IF EXISTS testtb");
+    let _ = remote_testtb.db.execute("DELETE FROM datasync WHERE tbname='testtb'");
+    let _ = remote_testtb.db.execute(datastate::datastate::TESTTB_CREATE_SQL);
+    println!("远程数据库: 已重建testtb表");
+
+    // 删除旧表并重新创建（本地数据库）
+    // 使用 with_db_path 方法，避免使用单例模式
+    let local_db_path = "docs/config/local.db";
+    let local_testtb = TestTb::with_db_path(local_db_path);
     let _ = local_testtb.db.execute("DROP TABLE IF EXISTS testtb");
-    
-    let today = chrono::Local::now().format("%Y%m%d").to_string();
-    let synclog_shard = format!("synclog_{}", today);
-    let _ = local_testtb.db.execute(&format!("DROP TABLE IF EXISTS {}", synclog_shard));
-    let _ = local_testtb.db.execute("DROP TABLE IF EXISTS synclog");
-    println!("客户端数据库: 已清理 synclog 表");
-    
+    let _ = local_testtb.db.execute("DELETE FROM datasync WHERE tbname='testtb'");
     let _ = local_testtb.db.execute(datastate::datastate::TESTTB_CREATE_SQL);
-    let _ = local_testtb.db.execute(datastate::SYS_SQL_CREATE_SQL_SQLITE);
-    let _ = local_testtb.db.execute(axum78::SYNCLOG_CREATE_SQL);
-    println!("客户端数据库: 已重建 testtb 表、sys_sql 表和 synclog 表");
+    println!("本地数据库: 已重建testtb表");
     
-    let app = axum78::create_router();
+    // 启动服务器（服务器端使用远程数据库路径）
+    use std::sync::Arc;
+    use axum78::AppState;
+    use tower_http::cors::{CorsLayer, Any};
+    use axum::middleware;
+    use axum78::sid_auth_middleware;
+
+    let state = Arc::new(AppState::new());
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]);
+
+    let app = axum::Router::new()
+        .route("/:apisys/:apimicro/:apiobj/:apifun", axum::routing::any(
+            |axum::extract::Path((_apisys, _apimicro, apiobj, apifun)): axum::extract::Path<(String, String, String, String)>,
+             axum::extract::Extension(verify_result): axum::extract::Extension<axum78::VerifyResult>,
+             axum::extract::Extension(up): axum::extract::Extension<axum78::UpInfo>| async move {
+                if apiobj == "testtb" {
+                    let (status, resp) = axum78::apitest::testmenu::testtb::handle(&apifun, up, &verify_result).await;
+                    (status, [(axum::http::header::CONTENT_TYPE, "application/json")], resp)
+                } else {
+                    let (status, resp) = axum78::apisvc::backsvc::datasync::handle(&apifun.to_lowercase(), up).await;
+                    (status, [(axum::http::header::CONTENT_TYPE, "application/json")], resp)
+                }
+            }
+        ))
+        .layer(middleware::from_fn(sid_auth_middleware))
+        .route("/health", axum::routing::get(|| async { "OK" }))
+        .with_state(state)
+        .layer(cors);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3780").await.expect("绑定端口失败");
     let _server_handle = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("服务器启动失败");
     });
     
+    // 等待服务器启动
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     
     // ===== 方案0: SID验证测试 =====
     println!("\n========== 方案0: SID验证测试 ==========");
     
+    // 测试空SID
     let empty_sid_result = download_from_server("").await;
     println!("空SID测试: {:?}", empty_sid_result);
+    assert!(empty_sid_result.is_err(), "空SID应该被拒绝");
     
+    // 测试无效SID格式（有效格式但CID不存在）
     let invalid_sid_result = download_from_server("invalid-cid-xyz").await;
     println!("无效SID测试: {:?}", invalid_sid_result);
+    // 注意：简单验证只检查格式，不检查CID是否存在于数据库
+    // 如果需要严格验证，需要启用数据库验证
     
-    println!("✅ 方案0通过 - SID验证测试（使用GUEST身份作为后备）");
+    println!("✅ 方案0通过 - SID验证测试");
     
     // ===== 方案1: 单向下载测试 =====
     println!("\n========== 方案1: 单向下载测试 ==========");
     
-    // 清理 MySQL 测试数据
-    let _ = clear_mysql_testtb(&sid, &test_prefix).await;
-    
-    // 直接向 MySQL 插入测试数据（通过 API）
+    // 服务器插入5条数据（使用远程数据库）
     for i in 0..5 {
         let mut record = std::collections::HashMap::new();
         record.insert("cid".to_string(), serde_json::json!(CID));
-        record.insert("kind".to_string(), serde_json::json!(format!("{}server_kind_{}", test_prefix, i)));
+        record.insert("kind".to_string(), serde_json::json!(format!("server_kind_{}", i)));
         record.insert("item".to_string(), serde_json::json!(format!("server_item_{}", i)));
         record.insert("data".to_string(), serde_json::json!(format!("server_data_{}", i)));
         
-        let client = reqwest::Client::new();
-        let body = serde_json::json!({
-            "sid": sid,
-            "pars": record
-        }).to_string();
-        
-        let resp = client
-            .post(format!("{}/apitest/testmenu/testtb/madd", SERVER_URL))
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .expect("请求失败");
-        
-        let json: serde_json::Value = resp.json().await.expect("解析失败");
-        println!("服务器插入: {} -> {:?}", i, json.get("back"));
+        let id = remote_testtb.m_save(&record, "testtb", &format!("方案1-服务器插入{}", i)).expect("保存失败");
+        println!("服务器插入: {} -> id={}", i, &id);
     }
+    
+    // 检查服务器记录数（远程数据库）
+    let server_rows = remote_testtb.mlist("testtb", 1000, "获取所有记录").unwrap();
+    println!("服务器记录数: {}", server_rows.len());
+    assert_eq!(server_rows.len(), 5);
     
     // 客户端下载
     let items = download_from_server(&sid).await.expect("下载失败");
     println!("下载到 {} 条记录", items.len());
     
-    // 客户端保存下载的数据
+    // 客户端保存下载的数据（使用本地数据库）
+    // 使用 m_sync_save 方法，因为这是同步数据，不应该自动填充 CID、upby、uptime
     for item in &items {
+        println!("准备保存: id={}, kind={}", item.id, item.kind);
         let mut record = std::collections::HashMap::new();
         record.insert("id".to_string(), serde_json::json!(item.id));
         record.insert("cid".to_string(), serde_json::json!(item.cid));
@@ -360,13 +297,14 @@ async fn test_all_plans() {
         record.insert("upby".to_string(), serde_json::json!(item.upby));
         record.insert("uptime".to_string(), serde_json::json!(item.uptime));
         
-        let _ = local_testtb.m_sync_save(&record);
+        let result = local_testtb.m_sync_save(&record);
+        println!("保存结果: {:?}", result);
     }
     
-    // 检查客户端记录数
+    // 检查客户端记录数（本地数据库）
     let client_rows = local_testtb.mlist("testtb", 1000, "获取所有记录").unwrap();
     println!("客户端记录数: {}", client_rows.len());
-    assert!(client_rows.len() >= 5, "客户端记录数应该 >= 5");
+    assert_eq!(client_rows.len(), 5);
     println!("✅ 方案1通过");
     
     // ===== 方案2: 客户端变更同步 =====
@@ -377,11 +315,11 @@ async fn test_all_plans() {
     let id_for_update = existing.get(0).map(|r| r.id.clone()).unwrap();
     let id_for_delete = existing.get(1).map(|r| r.id.clone()).unwrap();
     
-    // 添加2条（使用唯一 kind 值避免冲突）
+    // 添加2条（使用 m_save 自动写 sync_queue）
     for i in 0..2 {
         let mut record = std::collections::HashMap::new();
         record.insert("cid".to_string(), serde_json::json!(CID));
-        record.insert("kind".to_string(), serde_json::json!(format!("{}add_kind_{}", test_prefix, i)));
+        record.insert("kind".to_string(), serde_json::json!(format!("add_kind_{}", i)));
         record.insert("item".to_string(), serde_json::json!(format!("add_item_{}", i)));
         record.insert("data".to_string(), serde_json::json!(format!("add_data_{}", i)));
         
@@ -389,116 +327,181 @@ async fn test_all_plans() {
     }
     println!("客户端添加2条");
     
-    // 修改1条
+    // 修改1条（使用 m_update 自动写 sync_queue）
     let mut update_record = std::collections::HashMap::new();
-    update_record.insert("kind".to_string(), serde_json::json!(format!("{}updated_kind", test_prefix)));
+    update_record.insert("kind".to_string(), serde_json::json!("updated_kind"));
     update_record.insert("item".to_string(), serde_json::json!("updated_item"));
     update_record.insert("data".to_string(), serde_json::json!("updated_data"));
     local_testtb.m_update(&id_for_update, &update_record, "testtb", "方案2-客户端修改").expect("修改失败");
     println!("客户端修改1条");
     
-    // 删除1条
+    // 删除1条（使用 m_del 自动写 sync_queue）
     local_testtb.m_del(&id_for_delete, "testtb", "方案2-客户端删除").expect("删除失败");
     println!("客户端删除1条");
     
-    // 从本地 synclog 读取记录并上传到服务器
-    let synclog_items = read_local_synclog(&local_testtb);
-    println!("读取本地 synclog: {} 条", synclog_items.len());
+    // 从本地 sync_queue 读取记录并上传到服务器
+    let datasync_items = read_local_datasync(&local_testtb);
+    println!("读取本地 sync_queue: {} 条", datasync_items.len());
     
-    // 上传 synclog
-    let batches = upload_synclog(&sid, synclog_items).await.expect("上传失败");
-    println!("上传 {} 条 synclog", batches);
+    // 上传datasync
+    let batches = upload_datasync(&sid, datasync_items).await.expect("上传失败");
+    println!("上传 {} 条datasync", batches);
     
-    // 执行 doWork
-    let (processed, _) = do_work(&sid, WORKER_A).await.expect("doWork失败");
+    // 执行doWork
+    let (processed, _) = do_work().await.expect("doWork失败");
     println!("doWork处理 {} 条", processed);
     
-    // 等待 synclog 标记为 synced
-    tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
-    
-    // 验证客户端数据
+    // 验证服务器数据（远程数据库）
+    let server_rows = remote_testtb.mlist("testtb", 1000, "获取所有记录").unwrap();
     let client_rows = local_testtb.mlist("testtb", 1000, "获取所有记录").unwrap();
     println!("客户端记录数: {}", client_rows.len());
+    println!("服务器记录数: {}", server_rows.len());
+    assert_eq!(client_rows.len(), server_rows.len());
     println!("✅ 方案2通过");
     
     // ===== 方案3: 服务器变更同步 =====
     println!("\n========== 方案3: 服务器变更同步 ==========");
     
-    // 服务器端添加数据（通过 API，使用唯一 kind 值）
+    // 服务器端直接操作数据库（使用 DataState 基类）
+    // 这些操作会产生 datasync，客户端可以下载并执行
+    
+    // 服务器添加2条（使用 m_save 自动填充 upby、uptime，自动写 datasync）
     for i in 0..2 {
         let mut record = std::collections::HashMap::new();
         record.insert("cid".to_string(), serde_json::json!(CID));
-        record.insert("kind".to_string(), serde_json::json!(format!("{}server_add_kind_{}", test_prefix, i)));
+        record.insert("kind".to_string(), serde_json::json!(format!("server_add_kind_{}", i)));
         record.insert("item".to_string(), serde_json::json!(format!("server_add_item_{}", i)));
         record.insert("data".to_string(), serde_json::json!(format!("server_add_data_{}", i)));
         
-        let client = reqwest::Client::new();
-        let body = serde_json::json!({
-            "sid": format!("{}|{}", CID, WORKER_B),
-            "pars": record
-        }).to_string();
-        
-        let resp = client
-            .post(format!("{}/apitest/testmenu/testtb/madd", SERVER_URL))
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .expect("请求失败");
-        
-        let json: serde_json::Value = resp.json().await.expect("解析失败");
-        println!("服务器添加: {} -> {:?}", i, json.get("back"));
+        let _ = remote_testtb.m_save(&record, "testtb", &format!("方案3-服务器添加{}", i)).expect("保存失败");
     }
     println!("服务器添加2条");
     
-    // 等待 synclog 标记为 synced
-    tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
+    // 读取服务器端产生的 datasync
+    let server_datasync = read_remote_datasync(&remote_testtb);
+    println!("服务器产生 {} 条datasync", server_datasync.len());
     
-    // 客户端下载 synclog (worker != WORKER_A)
-    let synclog_items = get_synclog_by_worker(&sid, WORKER_A, 100).await.expect("下载synclog失败");
-    println!("下载到 {} 条 synclog", synclog_items.len());
+    // 上传datasync到服务器（模拟另一个客户端上传）
+    let batches = upload_datasync(&format!("{}|{}", CID, WORKER_B), server_datasync).await.expect("上传失败");
+    println!("上传 {} 条datasync", batches);
     
-    // 执行 synclog 中的 SQL
-    for item in &synclog_items {
-        if item.tbname != "testtb" {
-            continue;
-        }
-        println!("执行: action={}, cmdtext={}", item.action, &item.cmdtext[..item.cmdtext.len().min(100)]);
-        
+    // 执行doWork (这会在服务器端执行INSERT)
+    let (processed, _) = do_work().await.expect("doWork失败");
+    println!("doWork处理 {} 条", processed);
+    
+    // 客户端下载datasync (worker != WORKER_A)
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({"sid": format!("{}|{}", CID, WORKER_A), "getnumber": 100}).to_string();
+    let resp = client
+        .post(format!("{}/apisvc/backsvc/datasync/get", SERVER_URL))
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("请求失败");
+    
+    let json: serde_json::Value = resp.json().await.expect("解析失败");
+    let res = json.get("res").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if res != 0 {
+        panic!("下载datasync失败: {:?}", json.get("errmsg"));
+    }
+    
+    // jsdata字段是JSON字符串
+    let jsdata_str = json.get("jsdata").and_then(|v| v.as_str()).expect("无jsdata");
+    let jsdata: serde_json::Value = serde_json::from_str(jsdata_str).expect("解析jsdata失败");
+    let bytedata_base64 = jsdata.get("bytedata").and_then(|v| v.as_str()).expect("无bytedata");
+    let bytes = base64::engine::general_purpose::STANDARD.decode(bytedata_base64.as_bytes()).expect("Base64解码失败");
+    let datasync_batch = DatasyncBatch::decode(&*bytes).expect("解码失败");
+    
+    println!("下载到 {} 条datasync", datasync_batch.items.len());
+    
+    // 执行datasync中的SQL（使用 m_sync_save 方法，不自动填充字段）
+    for item in &datasync_batch.items {
+        let params: Vec<serde_json::Value> = serde_json::from_str(&item.params).unwrap();
+        println!("执行: action={}, params={:?}", item.action, params);
         match item.action.as_str() {
-            "insert" | "update" => {
-                // cmdtext 是业务数据的 JSON
-                let record_data: std::collections::HashMap<String, serde_json::Value> = 
-                    serde_json::from_str(&item.cmdtext).unwrap_or_default();
-                
-                if !record_data.is_empty() {
-                    let id = record_data.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    if !id.is_empty() {
-                        let _ = local_testtb.m_sync_save(&record_data);
-                        println!("保存记录: id={}", id);
-                    }
+            "insert" => {
+                // params 顺序是按字母顺序排列的：cid, data, id, item, kind, upby, uptime
+                let mut record = std::collections::HashMap::new();
+                record.insert("cid".to_string(), params.get(0).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("data".to_string(), params.get(1).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("id".to_string(), params.get(2).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("item".to_string(), params.get(3).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("kind".to_string(), params.get(4).cloned().unwrap_or(serde_json::Value::Null));
+                if params.len() > 5 {
+                    record.insert("upby".to_string(), params.get(5).cloned().unwrap_or(serde_json::Value::Null));
                 }
+                if params.len() > 6 {
+                    record.insert("uptime".to_string(), params.get(6).cloned().unwrap_or(serde_json::Value::Null));
+                }
+                
+                let result = local_testtb.m_sync_save(&record);
+                let id_str = params.get(2).and_then(|v| v.as_str()).unwrap_or("");
+                println!("INSERT结果: {:?}, id={}", result, id_str);
+            }
+            "update" => {
+                // update params 顺序：cid, data, item, kind, upby, uptime, id（id 在最后）
+                let id = params.last().and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let mut record = std::collections::HashMap::new();
+                record.insert("cid".to_string(), params.get(0).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("data".to_string(), params.get(1).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("item".to_string(), params.get(2).cloned().unwrap_or(serde_json::Value::Null));
+                record.insert("kind".to_string(), params.get(3).cloned().unwrap_or(serde_json::Value::Null));
+                if params.len() > 5 {
+                    record.insert("upby".to_string(), params.get(4).cloned().unwrap_or(serde_json::Value::Null));
+                }
+                if params.len() > 6 {
+                    record.insert("uptime".to_string(), params.get(5).cloned().unwrap_or(serde_json::Value::Null));
+                }
+                
+                let _ = local_testtb.m_sync_update(&id, &record);
             }
             "delete" => {
-                let _ = local_testtb.m_sync_del(&item.idrow);
-                println!("删除记录: id={}", item.idrow);
+                let id = params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let _ = local_testtb.m_sync_del(&id);
             }
             _ => {}
         }
     }
     
-    // 验证客户端数据
+    // 验证最终数据一致性
+    let server_rows = remote_testtb.mlist("testtb", 1000, "获取所有记录").unwrap();
     let client_rows = local_testtb.mlist("testtb", 1000, "获取所有记录").unwrap();
     println!("客户端记录数: {}", client_rows.len());
+    println!("服务器记录数: {}", server_rows.len());
+
+    // 强化验证：不仅检查数量，还要检查数据内容完全一致
+    assert_eq!(client_rows.len(), server_rows.len());
+
+    // 按ID排序后比较每条记录
+    let mut client_sorted = client_rows.clone();
+    let mut server_sorted = server_rows.clone();
+    client_sorted.sort_by_key(|r| r.id.clone());
+    server_sorted.sort_by_key(|r| r.id.clone());
+
+    for (c, s) in client_sorted.iter().zip(server_sorted.iter()) {
+        assert_eq!(c.id, s.id, "ID不匹配");
+        assert_eq!(c.cid, s.cid, "cid不匹配");
+        assert_eq!(c.kind, s.kind, "kind不匹配");
+        assert_eq!(c.item, s.item, "item不匹配");
+        assert_eq!(c.data, s.data, "data不匹配");
+        // 注意：upby和uptime可能因为时间戳不同而有差异，这里只验证核心字段
+    }
+
     println!("✅ 方案3通过");
-    
+
     // ===== 方案4: 最终一致性验证 =====
     println!("\n========== 方案4: 最终一致性验证 ==========");
 
+    // 再次完整验证两边数据完全一致（包括所有字段）
+    let server_rows_final = remote_testtb.mlist("testtb", 1000, "最终验证").unwrap();
     let client_rows_final = local_testtb.mlist("testtb", 1000, "最终验证").unwrap();
-    println!("最终客户端记录数: {}", client_rows_final.len());
 
-    // 验证所有ID是否为雪花ID
+    println!("最终客户端记录数: {}", client_rows_final.len());
+    println!("最终服务器记录数: {}", server_rows_final.len());
+    assert_eq!(client_rows_final.len(), server_rows_final.len(), "记录数量不一致");
+
+    // 验证所有ID是否为雪花ID（16-19位数字）
     fn is_valid_snowflake_id(id: &str) -> bool {
         id.len() >= 16 && id.len() <= 19 && id.chars().all(|c| c.is_ascii_digit())
     }
@@ -507,13 +510,31 @@ async fn test_all_plans() {
         assert!(is_valid_snowflake_id(&row.id), "无效的雪花ID: {}", row.id);
     }
 
+    // 完整数据比较
+    let mut client_sorted = client_rows_final.clone();
+    let mut server_sorted = server_rows_final.clone();
+    client_sorted.sort_by_key(|r| r.id.clone());
+    server_sorted.sort_by_key(|r| r.id.clone());
+
+    let mut data_match = true;
+    for (c, s) in client_sorted.iter().zip(server_sorted.iter()) {
+        if c.id != s.id || c.cid != s.cid || c.kind != s.kind ||
+           c.item != s.item || c.data != s.data {
+            data_match = false;
+            println!("数据不匹配: 客户端={:?}, 服务器={:?}", c, s);
+            break;
+        }
+    }
+
+    assert!(data_match, "数据内容不一致！");
     println!("✅ 方案4通过 - 最终一致性验证通过");
 
     // ===== 方案5: 冲突测试（时间戳优先策略） =====
     println!("\n========== 方案5: 冲突测试 ==========");
 
-    // 清理 synclog 准备冲突测试
-    let _ = local_testtb.db.execute("DELETE FROM synclog WHERE tbname='testtb'");
+    // 清空datasync准备冲突测试
+    let _ = local_testtb.db.execute("DELETE FROM datasync WHERE tbname='testtb'");
+    let _ = remote_testtb.db.execute("DELETE FROM datasync WHERE tbname='testtb'");
 
     // 选择一个现有记录作为冲突目标
     let conflict_target = client_rows_final.first().expect("无记录可用于冲突测试");
@@ -521,9 +542,9 @@ async fn test_all_plans() {
 
     println!("冲突目标ID: {}", conflict_id);
 
-    // 步骤A: 客户端修改记录
+    // 步骤A: 客户端修改记录（使用较早的时间戳）
     let client_uptime_str = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let client_kind = format!("{}conflict_client_kind", test_prefix);
+    let client_kind = "conflict_client_kind";
     let client_item = "conflict_client_item";
     let client_data = "conflict_client_data";
 
@@ -533,52 +554,69 @@ async fn test_all_plans() {
     client_update.insert("data".to_string(), serde_json::json!(client_data));
     local_testtb.m_update(&conflict_id, &client_update, "testtb", "方案5-客户端修改").expect("客户端修改失败");
 
+    // 步骤B: 服务器也修改同一记录（使用较晚的时间戳）
+    let server_uptime_str = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let server_kind = "conflict_server_kind";
+    let server_item = "conflict_server_item";
+    let server_data = "conflict_server_data";
+
+    let mut server_update = std::collections::HashMap::new();
+    server_update.insert("kind".to_string(), serde_json::json!(server_kind));
+    server_update.insert("item".to_string(), serde_json::json!(server_item));
+    server_update.insert("data".to_string(), serde_json::json!(server_data));
+    remote_testtb.m_update(&conflict_id, &server_update, "testtb", "方案5-服务器修改").expect("服务器修改失败");
+
     println!("客户端修改: kind={}, uptime={}", client_kind, client_uptime_str);
+    println!("服务器修改: kind={}, uptime={}", server_kind, server_uptime_str);
 
-    // 步骤B: 客户端上传变更到服务器
-    let client_synclog = read_local_synclog(&local_testtb);
-    if !client_synclog.is_empty() {
-        let batches1 = upload_synclog(&sid, client_synclog).await.expect("上传客户端变更失败");
-        println!("上传客户端 synclog: {} 条", batches1);
+    // 步骤C: 客户端上传变更到服务器
+    let client_datasync = read_local_datasync(&local_testtb);
+    let batches1 = upload_datasync(&sid, client_datasync).await.expect("上传客户端变更失败");
+    println!("上传客户端datasync: {} 条", batches1);
 
-        // 执行 doWork 应用客户端变更
-        let (processed1, _) = do_work(&sid, WORKER_A).await.expect("doWork处理客户端变更失败");
-        println!("doWork处理客户端变更: {} 条", processed1);
-    }
+    // 执行doWork应用客户端变更
+    let (processed1, _) = do_work().await.expect("doWork处理客户端变更失败");
+    println!("doWork处理客户端变更: {} 条", processed1);
 
-    // 等待 synclog 标记为 synced
-    tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
+    // 步骤D: 服务器端上传变更（模拟另一个worker）
+    let server_datasync = read_remote_datasync(&remote_testtb);
+    let batches2 = upload_datasync(&format!("{}|{}", CID, WORKER_B), server_datasync).await.expect("上传服务器变更失败");
+    println!("上传服务器datasync: {} 条", batches2);
 
-    // 步骤C: 验证客户端变更已同步到服务器
-    // 从 MySQL 下载最新数据
-    let server_items = download_from_server(&sid).await.expect("下载服务器数据失败");
-    let server_item = server_items.iter().find(|i| i.id == conflict_id);
-    
-    if let Some(s_item) = server_item {
-        println!("服务器数据: kind={}, item={}, data={}", s_item.kind, s_item.item, s_item.data);
-        assert_eq!(s_item.kind, client_kind, "客户端变更应已同步到服务器");
-        assert_eq!(s_item.item, client_item, "客户端变更应已同步到服务器");
-        assert_eq!(s_item.data, client_data, "客户端变更应已同步到服务器");
-    }
+    // 执行doWork应用服务器变更
+    let (processed2, _) = do_work().await.expect("doWork处理服务器变更失败");
+    println!("doWork处理服务器变更: {} 条", processed2);
 
-    // 步骤D: 验证客户端本地数据
-    let final_client = local_testtb.mlist("testtb", 100, "获取冲突记录").expect("查询客户端记录失败")
-        .into_iter()
-        .find(|r| r.id == conflict_id)
-        .expect("找不到冲突记录");
+    // 步骤E: 冲突解决验证
+    // 现在两边应该都同步了。根据时间戳优先原则，较新的那个应该胜出
+    // 我们需要检查最终值是否符合预期
+
+    let final_client = local_testtb.mlist("testtb", 1, "获取冲突记录").expect("查询客户端记录失败").into_iter().find(|r| r.id == conflict_id).unwrap();
+    let final_server = remote_testtb.mlist("testtb", 1, "获取冲突记录").expect("查询服务器记录失败").into_iter().find(|r| r.id == conflict_id).unwrap();
 
     println!("冲突解决后:");
     println!("  客户端: kind={}, item={}, data={}", final_client.kind, final_client.item, final_client.data);
+    println!("  服务器: kind={}, item={}, data={}", final_server.kind, final_server.item, final_server.data);
 
-    // 验证客户端和服务器数据一致
-    assert_eq!(final_client.kind, client_kind, "客户端数据应与服务器一致");
-    assert_eq!(final_client.item, client_item, "客户端数据应与服务器一致");
-    assert_eq!(final_client.data, client_data, "客户端数据应与服务器一致");
+    // 验证两边数据一致
+    assert_eq!(final_client.kind, final_server.kind, "冲突后客户端和服务器kind不一致");
+    assert_eq!(final_client.item, final_server.item, "冲突后客户端和服务器item不一致");
+    assert_eq!(final_client.data, final_server.data, "冲突后客户端和服务器data不一致");
 
-    println!("✅ 方案5通过 - 客户端变更同步测试通过");
+    // 验证冲突解决符合时间戳优先
+    // 由于服务器时间戳较晚，应该胜出
+    let expected_kind = server_kind;
+    let expected_item = server_item;
+    let expected_data = server_data;
 
-    // 验证 upby/uptime 字段
-    println!("\n========== 验证 upby/uptime 字段 ==========");
+    assert_eq!(final_client.kind, expected_kind, "冲突解决失败：应为服务器值");
+    assert_eq!(final_client.item, expected_item, "冲突解决失败：应为服务器值");
+    assert_eq!(final_client.data, expected_data, "冲突解决失败：应为服务器值");
+
+    println!("✅ 方案5通过 - 冲突测试通过（时间戳优先）");
+
+    // 验证upby/uptime字段
+    println!("\n========== 验证upby/uptime字段 ==========");
     let rows = local_testtb.mlist("testtb", 3, "验证字段").unwrap();
     for row in &rows {
         println!("客户端: id={}, kind={}, upby={}, uptime={}", &row.id[..8.min(row.id.len())], row.kind, row.upby, row.uptime);
