@@ -9,6 +9,7 @@ pub mod base78;
 pub mod context;
 pub mod response;
 pub mod base_api;
+#[cfg(feature = "router")]
 pub mod router;
 pub mod server;
 
@@ -41,6 +42,7 @@ pub const SYNCLOG_CREATE_SQL: &str = r#"CREATE TABLE IF NOT EXISTS synclog (
 )"#;
 pub use response::{ApiResponse, ApiError};
 pub use base_api::{BaseApi, TableConfig};
+#[cfg(feature = "router")]
 pub use router::{ApiRouter78, Controller78, create_router, create_router_with_custom};
 pub use server::Server;
 

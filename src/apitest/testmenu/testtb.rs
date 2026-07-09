@@ -26,18 +26,17 @@ use once_cell::sync::Lazy;
 pub struct testtbItem {
     #[prost(string, tag = "1")]
     pub id: String,
-    #[prost(int32, tag = "2")]
-    #[prost(string, tag = "3")]
+    #[prost(string, tag = "2")]
     pub cid: String,
-    #[prost(string, tag = "4")]
+    #[prost(string, tag = "3")]
     pub kind: String,
-    #[prost(string, tag = "5")]
+    #[prost(string, tag = "4")]
     pub item: String,
-    #[prost(string, tag = "6")]
+    #[prost(string, tag = "5")]
     pub data: String,
-    #[prost(string, tag = "7")]
+    #[prost(string, tag = "6")]
     pub upby: String,
-    #[prost(string, tag = "8")]
+    #[prost(string, tag = "7")]
     pub uptime: String,
 }
 
@@ -203,7 +202,6 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
         // 只返回当前帐套或 cid 为空的数据
         if cid.is_empty() || cid == expected_cid {
             let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let id = row.get("id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let item = row.get("item").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let data = row.get("data").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -211,7 +209,6 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
             let uptime = row.get("uptime").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
             Some(testtbItem {
-                id,
                 id,
                 cid,
                 kind,

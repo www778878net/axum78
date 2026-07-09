@@ -548,7 +548,7 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
     };
 
     // 获取客户端传递的最后serverid（雪花id），首次同步传 "0"
-    let last_server_id = if up.mid > 0 { up.mid.to_string() } else { "0".to_string() };
+    let last_server_id = if let Ok(v) = up.mid.parse::<i64>() { if v > 0 { up.mid.clone() } else { "0".to_string() } } else { "0".to_string() };
 
     // 确保表存在
     if let Err(e) = ensure_datasync_table(mysql) {

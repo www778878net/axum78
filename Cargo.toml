@@ -52,6 +52,11 @@ reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], def
 # Memcached 客户端 (禁用tls，避免openssl依赖)
 memcache = { version = "0.18", default-features = false }
 
+[features]
+default = ["router"]
+router = []
+sync_server = []
+
 [dev-dependencies]
 serial_test = "3"
 

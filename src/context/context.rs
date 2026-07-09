@@ -17,8 +17,6 @@ pub struct RequestBody {
     #[serde(default)]
     pub mid: String,
     #[serde(default)]
-    pub mid: Option<i64>,
-    #[serde(default)]
     pub order: String,
     #[serde(default)]
     pub start: Option<i64>,
