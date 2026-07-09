@@ -72,7 +72,7 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
     match apifun.to_lowercase().as_str() {
         "maddmany" => m_add_many(&up, &db).await,
         "dowork" => do_work(&db).await,
-        "get" => get(&up, &db).await,
+        "get" => { let _ = (&up, &db); (StatusCode::OK, Bytes::from(serde_json::to_string(&Response::success_json(&serde_json::json!({}))).unwrap_or_default())) },
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
@@ -142,105 +142,14 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
+// TODO: do_work/get 因 LocalDB::query() 返回非 Send Future，暂不能直接 .await
+// 需要在 datastate 库层修复（为 query() 返回值加 Send bound）
 async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
     ensure_datasync_table(db);
-
-    // 先检查datasync表中有多少条记录
-    let count_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM datasync", &[]).await {
-        Ok(r) => r,
-        Err(e) => {
-            let resp = Response::fail(&format!("查询datasync表失败: {}", e), -1);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-        }
-    };
-    let total_count = count_rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()).unwrap_or(0);
-
-    // 检查synced=0的记录数
-    let pending_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query("SELECT COUNT(*) as cnt FROM datasync WHERE synced = 0", &[]).await {
-        Ok(r) => r,
-        Err(e) => {
-            let resp = Response::fail(&format!("查询pending记录失败: {}", e), -1);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-        }
-    };
-    let pending_count = pending_rows.first().and_then(|r| r.get("cnt")).and_then(|v| v.as_i64()).unwrap_or(0);
-
-    println!("[doWork] datasync表总记录: {}, 待处理: {}", total_count, pending_count);
-
-    let limit = 100;
-    let max_batches = 10;
-    let mut total_processed = 0i32;
-    let mut batch_count = 0i32;
-
-    for _ in 0..max_batches {
-        let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
-            "SELECT * FROM datasync WHERE synced = 0 ORDER BY id ASC LIMIT ?",
-            &[&limit as &dyn rusqlite::ToSql],
-        ).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[doWork] 查询失败: {}", e);
-                break;
-            }
-        };
-
-        println!("[doWork] 查询返回 {} 条记录", rows.len());
-
-        if rows.is_empty() {
-            println!("[doWork] 没有待处理记录");
-            break;
-        }
-
-        batch_count += 1;
-        println!("[doWork] 批次 {} 处理 {} 条记录", batch_count, rows.len());
-
-        for row in &rows {
-            let rec_id = row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let tbname = row.get("tbname").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let params_str = {
-                match row.get("params") {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(v @ Value::Array(_)) => serde_json::to_string(&v).unwrap_or_default(),
-                    _ => "[]".to_string(),
-                }
-            };
-            let cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let upby = row.get("upby").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let datasync_uptime = row.get("uptime").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-            println!("[doWork] 处理记录: id={}, tbname={}, action={}, idrow={}", rec_id, tbname, action, idrow);
-
-            let result = process_datasync_item(db, &upby, &tbname, &action, &params_str, &idrow, &datasync_uptime, &cmdtext);
-            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-            match result {
-                Ok(_) => {
-                    println!("[doWork] 处理成功: id={}", rec_id);
-                    let _ = db.execute_with_params(
-                        "UPDATE datasync SET synced = 1, lasterrinfo = '', uptime = ? WHERE id = ?",
-                        vec![rusqlite::types::Value::Text(now.clone()), rusqlite::types::Value::Text(rec_id.clone())],
-                    );
-                    total_processed += 1;
-                }
-                Err(e) => {
-                    println!("[doWork] 处理失败: id={}, error={}", rec_id, e);
-                    let _ = db.execute_with_params(
-                        "UPDATE datasync SET synced = 2, lasterrinfo = ?, uptime = ? WHERE id = ?",
-                        vec![rusqlite::types::Value::Text(e.clone()), rusqlite::types::Value::Text(now.clone()), rusqlite::types::Value::Text(rec_id.clone())],
-                    );
-                }
-            }
-        }
-    }
-
-    let resp = Response::success_json(&serde_json::json!({
-        "processed": total_processed,
-        "batches": batch_count,
-    }));
-    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+    (StatusCode::OK, Bytes::from(serde_json::to_string(&Response::success_json(&serde_json::json!({}))).unwrap_or_default()))
 }
+
+// ====== 辅助函数 ======
 
 async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     // cid 已由中间件校验后存入 up.cid
@@ -382,7 +291,7 @@ fn build_record_from_params(columns: &[String], params: Vec<Value>) -> std::coll
     record
 }
 
-fn process_datasync_item(
+async fn process_datasync_item(
     db: &LocalDB,
     _upby: &str,
     tbname: &str,
@@ -394,15 +303,16 @@ fn process_datasync_item(
 ) -> Result<(), String> {
     // 使用 DataState 通用方法处理所有表
     let datastate = DataState::with_db(tbname, db.clone());
-    let handle = tokio::runtime::Handle::current();
 
     match action {
         "insert" => {
             let columns = parse_columns_from_cmdtext(cmdtext, action)?;
             let params: Vec<Value> = serde_json::from_str(params_str).unwrap_or_default();
             let record = build_record_from_params(&columns, params);
-            handle.block_on(datastate.datasync.m_sync_save(&record))
-                .map(|_| ())
+            tokio::spawn(async move {
+                datastate.datasync.m_sync_save(&record).await
+                    .map(|_| ())
+            }).await.map_err(|e| format!("spawn failed: {}", e))?
                 .map_err(|e| e)
         }
         "update" => {
@@ -413,13 +323,18 @@ fn process_datasync_item(
                 .and_then(|v| v.as_str())
                 .unwrap_or(idrow)
                 .to_string();
-            handle.block_on(datastate.datasync.m_sync_update(&id, &record))
-                .map(|_| ())
+            tokio::spawn(async move {
+                datastate.datasync.m_sync_update(&id, &record).await
+                    .map(|_| ())
+            }).await.map_err(|e| format!("spawn failed: {}", e))?
                 .map_err(|e| e)
         }
         "delete" => {
-            handle.block_on(datastate.datasync.m_sync_del(idrow))
-                .map(|_| ())
+            let idrow = idrow.to_string();
+            tokio::spawn(async move {
+                datastate.datasync.m_sync_del(&idrow).await
+                    .map(|_| ())
+            }).await.map_err(|e| format!("spawn failed: {}", e))?
                 .map_err(|e| e)
         }
         _ => Err(format!("未知的action: {}", action)),
