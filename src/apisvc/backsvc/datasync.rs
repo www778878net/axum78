@@ -112,12 +112,14 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     ensure_datasync_table(db);
 
     let mut batches = 0;
+    println!("[maddmany] items count: {}", batch.items.len());
     for item in batch.items {
+        println!("[maddmany] item: id={}, tb={}, act={}, idrow={}", item.id, item.tbname, item.action, item.idrow);
         let id = if item.id.is_empty() { datastate::next_id_string() } else { item.id.clone() };
 
         let sql = "INSERT INTO datasync (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, cmdtextmd5, cid, upby) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)";
 
-        let _ = db.execute_with_params(
+        let exec_result = db.execute_with_params(
             sql,
             vec![
                 rusqlite::types::Value::Text(id.clone()),
@@ -135,6 +137,10 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
                 rusqlite::types::Value::Text(item.upby.clone()),
             ],
         ).await;
+        match &exec_result {
+            Ok(_) => println!("[maddmany] INSERT OK: id={}", id),
+            Err(e) => eprintln!("[maddmany] INSERT FAIL: id={}, err={}", id, e),
+        }
         batches += 1;
     }
 
