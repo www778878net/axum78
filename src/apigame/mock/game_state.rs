@@ -9,10 +9,13 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum::body::Bytes;
 use base::Response;
 use base::UpInfo;
+use crate::router::Controller78;
+use async_trait::async_trait;
+use serde_json::Value;
 
 /// 游戏状态共享数据
 pub static GAME_STATE: once_cell::sync::Lazy<Arc<GameStateData>> = 
@@ -186,4 +189,38 @@ async fn sign_in(data: &Arc<GameStateData>, _up: &UpInfo) -> (StatusCode, Bytes)
     
     let resp = Response::success_json(&result);
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+}
+
+// ====== Controller78 实现 ======
+
+pub struct GameStateController;
+
+#[async_trait]
+impl Controller78 for GameStateController {
+    async fn call(&self, up: &mut UpInfo, fun: &str, _method: &Method) -> Value {
+        let up_clone = up.clone();
+        let (_status, bytes) = handle(fun, up_clone).await;
+        let resp: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+
+        if let Some(res) = resp.get("res").and_then(|v| v.as_i64()) {
+            if res != 0 {
+                up.res = res as i32;
+                up.errmsg = resp.get("errmsg").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return Value::Null;
+            }
+        }
+
+        resp.get("back").and_then(|v| {
+            if let Some(s) = v.as_str() {
+                serde_json::from_str(s).ok()
+            } else {
+                Some(v.clone())
+            }
+        }).unwrap_or(Value::Null)
+    }
+}
+
+/// 注册到全局路由表
+pub fn register_controller() {
+    crate::router::registry::register("apigame/mock/game_state", Arc::new(GameStateController));
 }

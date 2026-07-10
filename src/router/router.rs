@@ -145,7 +145,9 @@ async fn api_handler(
     }
 
     let controller_path = format!("{}/{}/{}", apisys, apimicro, apiobj);
-    if let Some(controller) = state.controllers.get(&controller_path) {
+
+    // Registry-based controller lookup (koa78base 模式)，大小写不敏感
+    if let Some(controller) = crate::router::registry::lookup(&controller_path) {
         let result = controller.call(&mut up, &apifun, &method).await;
         if up.res != 0 {
             return bad_request(up.errmsg, up.res);
@@ -154,14 +156,8 @@ async fn api_handler(
         return (StatusCode::OK, content_type_json(), Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
-    let (status, resp_bytes) = match (apisys.to_lowercase().as_str(), apimicro.to_lowercase().as_str(), apiobj.as_str()) {
-        ("apisvc", "backsvc", "datasync") => crate::apisvc::backsvc::datasync::handle(&apifun, up).await,
-        _ => {
-            let resp = Response::fail(&format!("API not found: {}/{}/{}/{}", apisys, apimicro, apiobj, apifun), 404);
-            (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-        }
-    };
-    (status, content_type_json(), resp_bytes)
+    let resp = Response::fail(&format!("API not found: {}/{}/{}/{}", apisys, apimicro, apiobj, apifun), 404);
+    (StatusCode::NOT_FOUND, content_type_json(), Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
 /// 创建主路由器 (带认证中间件)

@@ -12,14 +12,17 @@
 
 use axum::{
     body::Bytes,
-    http::StatusCode,
+    http::{Method, StatusCode},
 };
 use base::{UpInfo, Response};
 use datastate::LocalDB;
 use datastate::datastate::DataState;
+use crate::router::Controller78;
+use async_trait::async_trait;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 #[derive(Clone, PartialEq, Message, Serialize, Deserialize)]
 pub struct DatasyncItem {
@@ -432,4 +435,44 @@ async fn process_datasync_item(
         }
         _ => Err(format!("未知的action: {}", action)),
     }
+}
+
+// ====== Controller78 实现 ======
+
+pub struct DatasyncController;
+
+#[async_trait]
+impl Controller78 for DatasyncController {
+    async fn call(&self, up: &mut UpInfo, fun: &str, _method: &Method) -> Value {
+        // 复用现有 handle（up 需 by-value，clone 一下）
+        let up_clone = up.clone();
+        let (_status, bytes) = handle(fun, up_clone).await;
+        let resp: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+
+        // 把 handle 的响应映射到 Controller78 的协议
+        if let Some(res) = resp.get("res").and_then(|v| v.as_i64()) {
+            if res != 0 {
+                up.res = res as i32;
+                up.errmsg = resp.get("errmsg").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return Value::Null;
+            }
+        }
+
+        // back 字段可能是 JSON 字符串或对象
+        resp.get("back").and_then(|v| {
+            if let Some(s) = v.as_str() {
+                serde_json::from_str(s).ok()
+            } else {
+                Some(v.clone())
+            }
+        }).unwrap_or(Value::Null)
+    }
+}
+
+/// 注册到全局路由表（调用一次即可）
+pub fn register_controller() {
+    let path = format!("apisvc/backsvc/datasync");
+    crate::router::registry::register(&path, Arc::new(DatasyncController));
+    // 也注册别名（兼容大小写）
+    crate::router::registry::register(&path.to_lowercase(), Arc::new(DatasyncController));
 }

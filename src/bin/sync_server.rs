@@ -9,6 +9,10 @@ use axum78::create_router;
 
 #[tokio::main]
 async fn main() {
+    // 注册所有 Controller（未来由宏/扫描自动完成）
+    axum78::apisvc::backsvc::datasync::register_controller();
+    axum78::apigame::mock::game_state::register_controller();
+
     let app = create_router();
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8686".to_string());
