@@ -11,6 +11,8 @@ use axum78::create_router;
 async fn main() {
     // 注册所有 Controller（未来由宏/扫描自动完成）
     axum78::apisvc::backsvc::datasync::register_controller();
+    axum78::apisvc::backsvc::datasync_mysql::register_controller();
+    axum78::apitest::testmenu::testtb::register_controller();
     axum78::apigame::mock::game_state::register_controller();
 
     let app = create_router();

@@ -12,13 +12,15 @@
 
 use axum::{
     body::Bytes,
-    http::StatusCode,
+    http::{Method, StatusCode},
 };
 use base::{UpInfo, Response};
 use datastate::{Mysql78, MysqlConfig, MysqlUpInfo};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use crate::VerifyResult;
+use crate::router::Controller78;
+use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -678,4 +680,40 @@ fn ensure_datasync_table(mysql: &Mysql78) -> Result<(), String> {
     mysql.do_m(sql, vec![], &up)
         .map(|_| ())
         .map_err(|e| format!("创建datasync表失败: {}", e))
+}
+
+// ====== Controller78 实现 ======
+
+pub struct DatasyncMysqlController;
+
+#[async_trait]
+impl Controller78 for DatasyncMysqlController {
+    async fn call(&self, up: &mut UpInfo, fun: &str, _method: &Method) -> Value {
+        // verify_result 从中间件已认证的 up 派生
+        let vr = VerifyResult::new(&up.cid, &up.uid, &up.uname);
+        let up_clone = up.clone();
+        let (_status, bytes) = handle(fun, up_clone, &vr).await;
+        let resp: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+
+        if let Some(res) = resp.get("res").and_then(|v| v.as_i64()) {
+            if res != 0 {
+                up.res = res as i32;
+                up.errmsg = resp.get("errmsg").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return Value::Null;
+            }
+        }
+
+        resp.get("back").and_then(|v| {
+            if let Some(s) = v.as_str() {
+                serde_json::from_str(s).ok()
+            } else {
+                Some(v.clone())
+            }
+        }).unwrap_or(Value::Null)
+    }
+}
+
+/// 注册到全局路由表
+pub fn register_controller() {
+    crate::router::registry::register("apisvc/backsvc/datasync_mysql", Arc::new(DatasyncMysqlController));
 }

@@ -7,14 +7,17 @@
 
 use axum::{
     body::Bytes,
-    http::StatusCode,
+    http::{Method, StatusCode},
 };
 use base::{UpInfo, Response, ProjectPath};
 use datastate::{Mysql78, MysqlConfig, MysqlUpInfo};
 use crate::VerifyResult;
+use crate::router::Controller78;
+use async_trait::async_trait;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use once_cell::sync::Lazy;
@@ -226,4 +229,40 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
     let bytedata = result.encode_to_vec();
     let resp = Response::success_bytes(bytedata);
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+}
+
+// ====== Controller78 实现 ======
+
+pub struct TesttbController;
+
+#[async_trait]
+impl Controller78 for TesttbController {
+    async fn call(&self, up: &mut UpInfo, fun: &str, _method: &Method) -> Value {
+        // verify_result 从中间件已认证的 up 派生
+        let vr = VerifyResult::new(&up.cid, &up.uid, &up.uname);
+        let up_clone = up.clone();
+        let (_status, bytes) = handle(fun, up_clone, &vr).await;
+        let resp: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+
+        if let Some(res) = resp.get("res").and_then(|v| v.as_i64()) {
+            if res != 0 {
+                up.res = res as i32;
+                up.errmsg = resp.get("errmsg").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return Value::Null;
+            }
+        }
+
+        resp.get("back").and_then(|v| {
+            if let Some(s) = v.as_str() {
+                serde_json::from_str(s).ok()
+            } else {
+                Some(v.clone())
+            }
+        }).unwrap_or(Value::Null)
+    }
+}
+
+/// 注册到全局路由表
+pub fn register_controller() {
+    crate::router::registry::register("apitest/testmenu/testtb", Arc::new(TesttbController));
 }
