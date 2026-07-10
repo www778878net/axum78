@@ -109,7 +109,7 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
         return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     };
 
-    ensure_datasync_table(db);
+    ensure_datasync_table(db).await;
 
     let mut batches = 0;
     println!("[maddmany] items count: {}", batch.items.len());
@@ -151,12 +151,13 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
 // do_work: 重放本地 datasync 表中待处理的记录(synced=0)到业务表
 // 流程: 取出 synced=0 的记录 -> 解析 cmdtext/params -> 重放到 tbname -> 标记 synced=1(成功)/-1(失败)
 async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
-    ensure_datasync_table(db);
+    ensure_datasync_table(db).await;
 
-    let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
-        "SELECT * FROM datasync WHERE synced = 0 ORDER BY id ASC",
-        &[],
-    ).await {
+    let dbc = db.clone();
+    let rows: Vec<std::collections::HashMap<String, serde_json::Value>> =
+        match tokio::task::spawn_blocking(move || {
+            dbc.query_sync("SELECT * FROM datasync WHERE synced = 0 ORDER BY id ASC", &[])
+        }).await.map_err(|e| format!("spawn_blocking: {}", e)).and_then(|r| r) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询待重放记录失败: {}", e), -1);
@@ -242,20 +243,22 @@ fn row_to_datasync_item(row: &std::collections::HashMap<String, serde_json::Valu
 // ====== 辅助函数 ======
 
 async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
-    // cid 已由中间件校验后存入 up.cid
     let expected_worker = if up.sid.contains('|') {
         up.sid.split('|').nth(1).unwrap_or("").to_string()
     } else {
         String::new()
     };
 
-    ensure_datasync_table(db);
+    ensure_datasync_table(db).await;
 
     let limit = up.getnumber as i32;
-    let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
-        "SELECT * FROM datasync WHERE synced = 1 AND cid = ? AND worker != ? ORDER BY id ASC LIMIT ?",
-        &[&up.cid as &dyn rusqlite::ToSql, &expected_worker, &limit],
-    ).await {
+    let cid = up.cid.clone();
+    let w = expected_worker.clone();
+    let dbc = db.clone();
+    let rows = match tokio::task::spawn_blocking(move || {
+        dbc.query_sync("SELECT * FROM datasync WHERE synced=1 AND cid=? AND worker!=? ORDER BY id ASC LIMIT ?",
+            &[&cid as &dyn rusqlite::ToSql, &w as &dyn rusqlite::ToSql, &limit as &dyn rusqlite::ToSql])
+    }).await.map_err(|e| format!("spawn_blocking: {}", e)).and_then(|r| r) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询失败: {}", e), -1);
@@ -299,7 +302,7 @@ async fn get(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
-fn ensure_datasync_table(db: &LocalDB) {
+async fn ensure_datasync_table(db: &LocalDB) {
     let sql = r#"CREATE TABLE IF NOT EXISTS datasync (
         id TEXT PRIMARY KEY,
         apisys TEXT NOT NULL DEFAULT 'v1',
@@ -318,7 +321,7 @@ fn ensure_datasync_table(db: &LocalDB) {
         upby TEXT NOT NULL DEFAULT '',
         uptime TEXT NOT NULL DEFAULT ''
     )"#;
-    let _ = db.execute(sql);
+    let _ = db.execute_with_params(sql, vec![]).await;
 }
 
 /// 从 cmdtext 解析列名
