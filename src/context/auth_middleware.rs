@@ -99,6 +99,9 @@ pub fn get_auth_config() -> &'static AuthConfig {
     AUTH_CONFIG.get_or_init(AuthConfig::load)
 }
 
+/// GUEST 帐套 cid（与 koa78base Config.ts DEFAULT_ACCOUNT_CONFIG.cid_default 一致）
+const CID_GUEST: &str = "318225842662547456";
+
 /// 最小请求体（用于解析客户端请求）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -249,7 +252,8 @@ pub async fn sid_auth_middleware(
         Ok(v) => v,
         Err(e) => {
             logger.detail(&format!("验证失败，使用GUEST身份: {}", e));
-            VerifyResult::new("GUEST000-8888-8888-8888-GUEST00GUEST", "", "guest")
+            // GUEST cid = koa78base 默认 cid_default（雪花数字串）
+            VerifyResult::new(CID_GUEST, "", "guest")
         }
     };
 
