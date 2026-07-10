@@ -89,7 +89,7 @@ async fn replay(db: &LocalDB, items: &[DatasyncItem]) -> usize {
             }
             _ => continue,
         };
-        if db.execute(&sql).await.is_ok() { n += 1; }
+        match db.execute(&sql).await { Ok(_) => { n += 1; } Err(e) => { eprintln!("  replay ERR: {} SQL={}", e, &sql[..100.min(sql.len())]); } }
     }
     n
 }
