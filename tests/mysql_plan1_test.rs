@@ -40,9 +40,15 @@ async fn push(client: &reqwest::Client, items: Vec<DatasyncItem>) -> (usize, usi
         .header("Content-Type","application/json")
         .body(serde_json::to_string(&serde_json::json!({"sid":"","jsdata":js})).unwrap())
         .send().await.expect("push").json().await.expect("json");
-    let back = &j["back"];
-    (back["success_ids"].as_array().map(|a|a.len()).unwrap_or(0),
-     back["failed"].as_array().map(|a|a.len()).unwrap_or(0))
+    let back: Value = j.get("back").and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_else(|| j.get("back").cloned().unwrap_or(Value::Null));
+    let ok = back["success_ids"].as_array().map(|a|a.len()).unwrap_or(0);
+    let fail = back["failed"].as_array().map(|a| {
+        for f in a { eprintln!("push FAIL: {} idrow={}", f["error"].as_str().unwrap_or("?"), f["idrow"].as_str().unwrap_or("?")); }
+        a.len()
+    }).unwrap_or(0);
+    (ok, fail)
 }
 
 async fn pull(client: &reqwest::Client, my: &str, cur: &str) -> DatasyncBatch {
@@ -58,7 +64,13 @@ async fn pull(client: &reqwest::Client, my: &str, cur: &str) -> DatasyncBatch {
 
 fn extract_cols(cmd: &str) -> Vec<&str> {
     if let (Some(s),Some(e)) = (cmd.find('('), cmd.find("VALUES")) {
-        cmd[s+1..e].split(',').map(|c|c.trim().trim_matches('`').trim_matches(')').trim()).filter(|c|!c.is_empty()).collect()
+        let inner = &cmd[s+1..e];
+        // 找到最后一个反引号或逗号之前，去掉末尾的 `)` 
+        let end = inner.rfind('`').unwrap_or(inner.len());
+        inner[..end].split(',')
+            .map(|c| c.trim().trim_matches('`').trim())
+            .filter(|c| !c.is_empty())
+            .collect()
     } else { vec![] }
 }
 
@@ -66,30 +78,61 @@ async fn replay(db: &LocalDB, items: &[DatasyncItem]) -> usize {
     let mut n = 0;
     for it in items {
         let p: Vec<Value> = serde_json::from_str(&it.params).unwrap_or_default();
+        let j: Option<Value> = serde_json::from_str(&it.cmdtext).ok();
         let sql = match it.action.as_str() {
             "insert" => {
+                // 优先用 cmdtext 解析列名（原始 SQL），fallback 到 JSON 业务数据
                 let cols = extract_cols(&it.cmdtext);
-                let vals: Vec<_> = cols.iter().enumerate().map(|(i,_)| {
-                    if i < p.len() && p[i].is_string() { format!("'{}'",p[i].as_str().unwrap().replace('\'',"''")) }
-                    else { "''".into() }
-                }).collect();
-                format!("INSERT OR REPLACE INTO testtb5 ({}) VALUES ({})", cols.join(","), vals.join(","))
+                if !cols.is_empty() {
+                    let vals: Vec<_> = cols.iter().enumerate().map(|(i,_)| {
+                        if i < p.len() && p[i].is_string() { format!("'{}'",p[i].as_str().unwrap().replace('\'',"''")) }
+                        else { "''".into() }
+                    }).collect();
+                    format!("INSERT OR REPLACE INTO testtb5 ({}) VALUES ({})", cols.join(","), vals.join(","))
+                } else if let Some(ref obj) = j.and_then(|v| v.as_object().cloned()) {
+                    let ks: Vec<_> = obj.keys().map(|k| k.as_str()).collect();
+                    let vs: Vec<_> = ks.iter().map(|k| {
+                        let v = &obj[*k];
+                        if v.is_string() { format!("'{}'", v.as_str().unwrap().replace('\'',"''")) }
+                        else if v.is_number() { format!("{}", v) }
+                        else if v.is_null() { "''".into() }
+                        else { format!("'{}'", v.to_string()) }
+                    }).collect();
+                    format!("INSERT OR REPLACE INTO testtb5 ({}) VALUES ({})", ks.join(","), vs.join(","))
+                } else { continue; }
             }
             "update" => {
-                let set_cols = ["kind","item","data","d2","upby","uptime","remark"];
-                let sets: Vec<_> = set_cols.iter().enumerate()
-                    .filter(|(i,_)| *i < p.len().saturating_sub(1))
-                    .map(|(i,c)| format!("{}='{}'",c,p[i].as_str().unwrap_or("").replace('\'',"''"))).collect();
-                let idv = p.last().and_then(|v|v.as_str()).unwrap_or("");
-                format!("UPDATE testtb5 SET {} WHERE id='{}'", sets.join(","), idv.replace('\'',"''"))
+                // 业务 JSON 全字段更新
+                if let Some(ref obj) = j.and_then(|v| v.as_object().cloned()) {
+                    let sid = obj.get("id").and_then(|v| v.as_i64()).map(|i| i.to_string())
+                        .or_else(|| obj.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    let sets: Vec<_> = obj.iter().filter(|(k,_)| *k != "id").map(|(k,v)| {
+                        let val = if v.is_string() { format!("'{}'", v.as_str().unwrap().replace('\'',"''")) }
+                            else if v.is_number() { format!("{}", v) }
+                            else { format!("'{}'", v.to_string()) };
+                        format!("{}={}", k, val)
+                    }).collect();
+                    format!("UPDATE testtb5 SET {} WHERE id='{}'", sets.join(","), sid.replace('\'',"''"))
+                } else { continue; }
             }
             "delete" => {
-                let idv = p.first().and_then(|v|v.as_str()).unwrap_or("");
-                format!("DELETE FROM testtb5 WHERE id='{}'", idv.replace('\'',"''"))
+                let idv = if let Some(ref obj) = j.and_then(|v| v.as_object().cloned()) {
+                    obj.get("id").and_then(|v| v.as_i64()).map(|i| i.to_string())
+                        .or_else(|| obj.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                } else {
+                    p.first().and_then(|v| v.as_str()).map(|s| s.to_string())
+                };
+                if let Some(idv) = idv {
+                    format!("DELETE FROM testtb5 WHERE id='{}'", idv.replace('\'',"''"))
+                } else { continue; }
             }
             _ => continue,
         };
-        match db.execute(&sql).await { Ok(_) => { n += 1; } Err(e) => { eprintln!("  replay ERR: {} SQL={}", e, &sql[..100.min(sql.len())]); } }
+        match db.execute(&sql).await {
+            Ok(_) => { n += 1; }
+            Err(e) => { eprintln!("  replay ERR: {} SQL={}", e, &sql[..120.min(sql.len())]); }
+        }
     }
     n
 }
