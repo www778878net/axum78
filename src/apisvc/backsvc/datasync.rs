@@ -71,8 +71,8 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
 
     match apifun.to_lowercase().as_str() {
         "maddmany" => m_add_many(&up, &db).await,
-        "dowork" => do_work(&db).await,
-        "get" => { let _ = (&up, &db); (StatusCode::OK, Bytes::from(serde_json::to_string(&Response::success_json(&serde_json::json!({}))).unwrap_or_default())) },
+        "dowork" => do_work(&up, &db).await,
+        "get" => get(&up, &db).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
@@ -148,11 +148,95 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
-// TODO: do_work/get 因 LocalDB::query() 返回非 Send Future，暂不能直接 .await
-// 需要在 datastate 库层修复（为 query() 返回值加 Send bound）
-async fn do_work(db: &LocalDB) -> (StatusCode, Bytes) {
+// do_work: 重放本地 datasync 表中待处理的记录(synced=0)到业务表
+// 流程: 取出 synced=0 的记录 -> 解析 cmdtext/params -> 重放到 tbname -> 标记 synced=1(成功)/-1(失败)
+async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     ensure_datasync_table(db);
-    (StatusCode::OK, Bytes::from(serde_json::to_string(&Response::success_json(&serde_json::json!({}))).unwrap_or_default()))
+
+    let rows: Vec<std::collections::HashMap<String, serde_json::Value>> = match db.query(
+        "SELECT * FROM datasync WHERE synced = 0 ORDER BY id ASC",
+        &[],
+    ).await {
+        Ok(r) => r,
+        Err(e) => {
+            let resp = Response::fail(&format!("查询待重放记录失败: {}", e), -1);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+        }
+    };
+
+    let mut processed = 0i32;
+    let mut success = 0i32;
+    let mut failed = 0i32;
+    let mut errors: Vec<serde_json::Value> = Vec::new();
+
+    for row in &rows {
+        let item = row_to_datasync_item(row);
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+        let replay = process_datasync_item(
+            db,
+            &up.uname,
+            &item.tbname,
+            &item.action,
+            &item.params,
+            &item.idrow,
+            &now,
+            &item.cmdtext,
+        ).await;
+
+        let (new_synced, lasterrinfo) = match &replay {
+            Ok(_) => (1i64, String::new()),
+            Err(e) => {
+                errors.push(serde_json::json!({ "id": item.id, "idrow": item.idrow, "error": e }));
+                (-1i64, e.clone())
+            }
+        };
+
+        let update_sql = "UPDATE datasync SET synced = ?, lasterrinfo = ?, uptime = ? WHERE id = ?";
+        let _ = db.execute_with_params(
+            update_sql,
+            vec![
+                rusqlite::types::Value::Integer(new_synced),
+                rusqlite::types::Value::Text(lasterrinfo),
+                rusqlite::types::Value::Text(now),
+                rusqlite::types::Value::Text(item.id.clone()),
+            ],
+        ).await;
+
+        processed += 1;
+        if replay.is_ok() { success += 1; } else { failed += 1; }
+    }
+
+    let resp = Response::success_json(&serde_json::json!({
+        "processed": processed,
+        "success": success,
+        "failed": failed,
+        "errors": errors,
+    }));
+    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+}
+
+/// 从一行 HashMap 解析为 DatasyncItem（params 取原始文本，用于重放）
+fn row_to_datasync_item(row: &std::collections::HashMap<String, serde_json::Value>) -> DatasyncItem {
+    let get_str = |k: &str| -> String {
+        row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    };
+    DatasyncItem {
+        id: get_str("id"),
+        apisys: get_str("apisys"),
+        apimicro: get_str("apimicro"),
+        apiobj: get_str("apiobj"),
+        tbname: get_str("tbname"),
+        action: get_str("action"),
+        cmdtext: get_str("cmdtext"),
+        params: get_str("params"),
+        idrow: get_str("idrow"),
+        worker: get_str("worker"),
+        synced: row.get("synced").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+        cmdtextmd5: get_str("cmdtextmd5"),
+        cid: get_str("cid"),
+        upby: get_str("upby"),
+    }
 }
 
 // ====== 辅助函数 ======
