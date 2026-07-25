@@ -558,19 +558,31 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
-    // 5秒安全水位线
-    let safe_interval_secs = 5;
-    let max_uptime = chrono::Local::now() - chrono::Duration::seconds(safe_interval_secs);
-    let max_uptime_str = max_uptime.format("%Y-%m-%d %H:%M:%S").to_string();
+    // 获取客户端传递的表名过滤
+    let tbname = up.tbname.clone();
 
-    // 查询 synced=1 且 worker != 本地worker 且 id > lastServerId 且 uptime <= max_uptime 的记录
-    let sql = "SELECT * FROM datasync WHERE synced = 1 AND worker != ? AND id > ? AND uptime <= ? ORDER BY id ASC LIMIT ?";
-    let params: Vec<Value> = vec![
-        Value::String(expected_worker),
-        Value::String(last_server_id),
-        Value::String(max_uptime_str),
-        Value::Number(limit.into()),
-    ];
+    // 查询 synced=1 且 worker != 本地worker 且 id > lastServerId 的记录
+    // 如果指定了 tbname 则按表过滤
+    let (sql, params) = if !tbname.is_empty() {
+        (
+            "SELECT * FROM datasync WHERE synced = 1 AND worker != ? AND id > ? AND tbname = ? ORDER BY id ASC LIMIT ?",
+            vec![
+                Value::String(expected_worker),
+                Value::String(last_server_id),
+                Value::String(tbname),
+                Value::Number(limit.into()),
+            ],
+        )
+    } else {
+        (
+            "SELECT * FROM datasync WHERE synced = 1 AND worker != ? AND id > ? ORDER BY id ASC LIMIT ?",
+            vec![
+                Value::String(expected_worker),
+                Value::String(last_server_id),
+                Value::Number(limit.into()),
+            ],
+        )
+    };
 
     let up_info = datastate::MysqlUpInfo::new();
     let rows = match mysql.do_get(sql, params, &up_info) {
