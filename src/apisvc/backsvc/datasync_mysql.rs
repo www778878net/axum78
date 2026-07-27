@@ -1,21 +1,29 @@
-//! datasync_mysql API实现 - MySQL 版本
+//! datasync Controller — 数据中心（MySQL 版）
 //!
 //! 路径: apisvc/backsvc/datasync_mysql
 //! 路由: POST /apisvc/backsvc/datasync_mysql/:apifun
 //!
-//! 核心功能：
-//! - m_add_many: 批量添加 datasync 并执行 SQL，返回成功/失败 ID 列表
-//! - get: 获取待同步记录
+//! API:
+//!   - maddmany:   接收 Worker 上传的 synclog + 执行业务 SQL + cid/uid 权限验证
+//!   - get:        查询 synclog_YYYYMMDD (synced=1)，含业务表数据回填，返回 protobuf
+//!   - getbyworker: 增量同步，过滤本地 worker + id 游标 + tbname 过滤
+//!   - TODO: 缺 dowork（重放 synced=0 → 业务表），需补齐
 //!
-//! 权限控制：
-//! - 用户只能操作自己帐套(cid)的数据
+//! synclog 操作委托给 datastate::data_sync::data_sync_mysql::SynclogMysql
+//!
+//! 数据库: 中心 MySQL (Mysql78, 环境变量 MYSQL_* 配置)
+//!
+//! 权限控制：用户只能操作自己帐套(cid)的数据
 
 use axum::{
     body::Bytes,
     http::{Method, StatusCode},
 };
 use base::{UpInfo, Response};
-use datastate::{Mysql78, MysqlConfig, MysqlUpInfo};
+use datastate::{
+    Mysql78, MysqlConfig, MysqlUpInfo,
+    data_sync::data_sync_mysql::{SynclogMysql, SynclogMysqlItem},
+};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use crate::VerifyResult;
@@ -403,70 +411,50 @@ fn insert_synclog(
     cid: &str,
     synced: i32,
     lasterrinfo: &str,
-    uptime: &str,
+    _uptime: &str,
     uname: &str,
 ) -> Result<(), String> {
-    let table_name = synclog_table_name();
-    let sql = format!(
-        "INSERT INTO `{}` (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, lasterrinfo, cmdtextmd5, cid, upby, uptime) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        table_name
-    );
-    
-    let params: Vec<Value> = vec![
-        Value::String(id.to_string()),
-        Value::String(item.apisys.clone()),
-        Value::String(item.apimicro.clone()),
-        Value::String(item.apiobj.clone()),
-        Value::String(item.tbname.clone()),
-        Value::String(item.action.clone()),
-        Value::String(item.cmdtext.clone()),
-        Value::String(item.params.clone()),
-        Value::String(item.idrow.clone()),
-        Value::String(item.worker.clone()),
-        Value::Number(synced.into()),
-        Value::String(lasterrinfo.to_string()),
-        Value::String(item.cmdtextmd5.clone()),
-        Value::String(cid.to_string()),
-        Value::String(uname.to_string()),
-        Value::String(uptime.to_string()),
-    ];
-
-    let up = datastate::MysqlUpInfo::new();
-    let result = mysql.do_m_add(&sql, params, &up);
-    match result {
-        Ok(r) if r.error.is_none() => Ok(()),
-        Ok(r) => Err(r.error.unwrap_or_else(|| "插入synclog失败".to_string())),
-        Err(e) => Err(e),
-    }
+    let sl = SynclogMysql::new(mysql.clone());
+    let sl_item = SynclogMysqlItem {
+        id: id.to_string(),
+        idpk: 0,
+        apisys: item.apisys.clone(),
+        apimicro: item.apimicro.clone(),
+        apiobj: item.apiobj.clone(),
+        tbname: item.tbname.clone(),
+        action: item.action.clone(),
+        cmdtext: item.cmdtext.clone(),
+        params: item.params.clone(),
+        idrow: item.idrow.clone(),
+        worker: item.worker.clone(),
+        synced,
+        lasterrinfo: lasterrinfo.to_string(),
+        cmdtextmd5: item.cmdtextmd5.clone(),
+        cid: cid.to_string(),
+        upby: uname.to_string(),
+    };
+    sl.insert(&sl_item)
 }
 
 /// 获取待同步记录（返回业务数据）
 async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, Bytes) {
-    let limit = up.getnumber as i32;
-
     // 确保 synclog 分表存在
     if let Err(e) = ensure_synclog_table(mysql) {
         let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
-    // 查询 synced=1（已同步到服务器）的记录（只查今天的分表）
-    let table_name = synclog_table_name();
-    let sql = format!("SELECT * FROM `{}` WHERE synced = 1 AND cid = ? ORDER BY id ASC LIMIT ?", table_name);
-    let params: Vec<Value> = vec![
-        Value::String(expected_cid.to_string()),
-        Value::Number(limit.into()),
-    ];
-
-    let up_info = datastate::MysqlUpInfo::new();
-    let rows = match mysql.do_get(&sql, params, &up_info) {
+    // 查询 synced=1（已同步到服务器）的记录
+    let sl = SynclogMysql::new(mysql.clone());
+    let rows = match sl.get(expected_cid, "", &up.order, up.getstart, up.getnumber) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询失败: {}", e), -1);
             return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
         }
     };
+
+    let up_info = datastate::MysqlUpInfo::new();
 
     // 构建 DatasyncItem，对于业务数据需要查询实际表内容
     let mut items: Vec<DatasyncItem> = Vec::new();
@@ -569,31 +557,8 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
     let tbname = args.first().map(|s| s.as_str()).unwrap_or("").to_string();
 
     // 查询 synced=1 且 worker != 本地worker 且 id > lastServerId
-    // 服务器只做纯 ID 比较，5秒安全线由客户端根据雪花ID时间戳自行计算
-    let table_name = synclog_table_name();
-    let (sql, params) = if !tbname.is_empty() {
-        (
-            format!("SELECT * FROM `{}` WHERE synced = 1 AND worker != ? AND id > ? AND tbname = ? ORDER BY id ASC LIMIT ?", table_name),
-            vec![
-                Value::String(expected_worker),
-                Value::String(last_server_id),
-                Value::String(tbname),
-                Value::Number(limit.into()),
-            ],
-        )
-    } else {
-        (
-            format!("SELECT * FROM `{}` WHERE synced = 1 AND worker != ? AND id > ? ORDER BY id ASC LIMIT ?", table_name),
-            vec![
-                Value::String(expected_worker),
-                Value::String(last_server_id),
-                Value::Number(limit.into()),
-            ],
-        )
-    };
-
-    let up_info = datastate::MysqlUpInfo::new();
-    let rows = match mysql.do_get(&sql, params, &up_info) {
+    let sl = SynclogMysql::new(mysql.clone());
+    let rows = match sl.get_by_worker(&expected_worker, &last_server_id, &tbname, limit) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询失败: {}", e), -1);
@@ -673,55 +638,9 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
-/// 获取当前应该使用的 synclog 分表名（00:00-00:05 仍用昨天，延迟 5 分钟换表）
-fn synclog_table_name() -> String {
-    let now = chrono::Local::now();
-    if now.hour() == 0 && now.minute() < 5 {
-        let yesterday = now - chrono::Duration::days(1);
-        format!("synclog_{}", yesterday.format("%Y%m%d"))
-    } else {
-        format!("synclog_{}", now.format("%Y%m%d"))
-    }
-}
-
 /// 确保当前 synclog 分表和明天的分表都存在
 fn ensure_synclog_table(mysql: &Mysql78) -> Result<(), String> {
-    let todo = vec![synclog_table_name(), synclog_tomorrow()];
-    for table_name in &todo {
-        let sql = format!(
-            "CREATE TABLE IF NOT EXISTS `{}` (\
-             id VARCHAR(64) PRIMARY KEY, \
-             apisys VARCHAR(50) NOT NULL DEFAULT 'v1', \
-             apimicro VARCHAR(50) NOT NULL DEFAULT 'iflow', \
-             apiobj VARCHAR(50) NOT NULL DEFAULT 'synclog', \
-             tbname VARCHAR(100) NOT NULL DEFAULT '', \
-             action VARCHAR(20) NOT NULL DEFAULT '', \
-             cmdtext TEXT NOT NULL, \
-             params TEXT NOT NULL, \
-             idrow VARCHAR(64) NOT NULL DEFAULT '', \
-             worker VARCHAR(100) NOT NULL DEFAULT '', \
-             synced INT NOT NULL DEFAULT 0, \
-             lasterrinfo TEXT, \
-             cmdtextmd5 VARCHAR(64) NOT NULL DEFAULT '', \
-             cid VARCHAR(64) NOT NULL DEFAULT '', \
-             upby VARCHAR(100) NOT NULL DEFAULT '', \
-             uptime DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, \
-             INDEX idx_synced (synced), \
-             INDEX idx_cid_worker (cid, worker) \
-             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
-            table_name
-        );
-        let up = datastate::MysqlUpInfo::new();
-        mysql.do_m(&sql, vec![], &up)
-            .map_err(|e| format!("创建{}失败: {}", table_name, e))?;
-    }
-    Ok(())
-}
-
-/// 获取明天的 synclog 分表名（预创建用）
-fn synclog_tomorrow() -> String {
-    let tomorrow = chrono::Local::now() + chrono::Duration::days(1);
-    format!("synclog_{}", tomorrow.format("%Y%m%d"))
+    SynclogMysql::new(mysql.clone()).ensure_tables()
 }
 
 // ====== Controller78 实现 ======

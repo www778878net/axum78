@@ -1,14 +1,14 @@
-//! datasync API实现
+//! datasync Controller — 数据中心（SQLite 版）
 //!
 //! 路径: apisvc/backsvc/datasync
 //! 路由: POST /apisvc/backsvc/datasync/:apifun
 //!
-//! 多端分布式同步：
-//! - 客户端和服务端使用同一个 datasync 表
-//! - 通过 worker 字段区分不同客户端
-//! - 下载时只获取 worker != 本地的记录
+//! API:
+//!   - maddmany: 接收 Worker 上传的 synclog，写入中心 datasync 表 (synced=0)
+//!   - dowork:   重放 synced=0 → 业务表，更新 synced 状态
+//!   - get:      按 cid+worker 返回 synced=1 记录 (protobuf)，给其他 Worker 下载
 //!
-//! 数据库由DataState基类自己控制，使用默认数据库路径
+//! 数据库: SQLite (docs/config/remote.db)，单表 datasync 不分片
 
 use axum::{
     body::Bytes,
