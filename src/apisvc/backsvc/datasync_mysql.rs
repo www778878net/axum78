@@ -7,9 +7,9 @@
 //!   - maddmany:   接收 Worker 上传的 synclog + 执行业务 SQL + cid/uid 权限验证
 //!   - get:        查询 synclog_YYYYMMDD (synced=1)，含业务表数据回填，返回 protobuf
 //!   - getbyworker: 增量同步，过滤本地 worker + id 游标 + tbname 过滤
-//!   - TODO: 缺 dowork（重放 synced=0 → 业务表），需补齐
+//!   - dowork:     重放 synced=0 → 业务表，标记 synced=1/-1
 //!
-//! synclog 操作委托给 datastate::data_sync::data_sync_mysql::SynclogMysql
+//! synclog 操作委托给 datastate::data_sync::synclog_mysql::SynclogMysql
 //!
 //! 数据库: 中心 MySQL (Mysql78, 环境变量 MYSQL_* 配置)
 //!
@@ -187,6 +187,7 @@ pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (
         "maddmany" => m_add_many(&up, &mysql, &user_cid, &user_uid).await,
         "get" => get(&up, &mysql, &user_cid).await,
         "getbyworker" => get_by_worker(&up, &mysql, &user_cid).await,
+        "dowork" => do_work(&up, &mysql).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
@@ -446,7 +447,7 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
 
     // 查询 synced=1（已同步到服务器）的记录
     let sl = SynclogMysql::new(mysql.clone());
-    let rows = match sl.get(expected_cid, "", &up.order, up.getstart, up.getnumber) {
+    let rows = match sl.get(expected_cid, "", &up.order, up.getstart as i64, up.getnumber as i64) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询失败: {}", e), -1);
@@ -528,6 +529,89 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
     (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
 }
 
+/// 重放 synced=0 的记录到业务表（过滤本地 worker，不重复操作自己的）
+///
+/// 流程：
+/// 1. 从 synclog 获取 synced=0 且 worker != 本地的记录
+/// 2. 逐条执行 SQL 到业务表
+/// 3. 标记 synced=1（成功）或 synced=-1（失败）
+async fn do_work(up: &UpInfo, mysql: &Mysql78) -> (StatusCode, Bytes) {
+    // 从 SID 提取本地 worker（格式：cid|worker）
+    let expected_worker = if up.sid.contains('|') {
+        up.sid.split('|').nth(1).unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+
+    if let Err(e) = ensure_synclog_table(mysql) {
+        let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
+
+    let sl = SynclogMysql::new(mysql.clone());
+    let rows = match sl.get_pending(&expected_worker, up.getnumber as i32) {
+        Ok(r) => r,
+        Err(e) => {
+            let resp = Response::fail(&format!("查询待重放记录失败: {}", e), -1);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+        }
+    };
+
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut success = 0i32;
+    let mut failed = 0i32;
+    let mut errors: Vec<serde_json::Value> = Vec::new();
+
+    for row in &rows {
+        let item = row_to_synclog_item(row);
+        let exec_result = execute_datasync_item(mysql, &item, &item.cid, &now);
+
+        let (synced, lasterrinfo) = match &exec_result {
+            Ok(_) => {
+                success += 1;
+                (1, String::new())
+            }
+            Err(e) => {
+                failed += 1;
+                errors.push(serde_json::json!({"id": item.id, "idrow": item.idrow, "error": e}));
+                (-1, e.clone())
+            }
+        };
+
+        let _ = sl.mark_synced_one(&item.id, synced, &lasterrinfo);
+    }
+
+    let resp = Response::success_json(&serde_json::json!({
+        "success": success,
+        "failed": failed,
+        "errors": errors,
+    }));
+    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+}
+
+/// 从 HashMap 转为 DatasyncItem（给 dowork 用）
+fn row_to_synclog_item(row: &HashMap<String, Value>) -> DatasyncItem {
+    let get_str = |k: &str| -> String {
+        row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    };
+    DatasyncItem {
+        id: get_str("id"),
+        apisys: get_str("apisys"),
+        apimicro: get_str("apimicro"),
+        apiobj: get_str("apiobj"),
+        tbname: get_str("tbname"),
+        action: get_str("action"),
+        cmdtext: get_str("cmdtext"),
+        params: get_str("params"),
+        idrow: get_str("idrow"),
+        worker: get_str("worker"),
+        synced: row.get("synced").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+        cmdtextmd5: get_str("cmdtextmd5"),
+        cid: get_str("cid"),
+        upby: get_str("upby"),
+    }
+}
+
 /// 获取其他客户端的变更记录（过滤本地worker）
 /// 使用雪花id作为增量同步的serverId
 /// 配合5秒安全水位线策略，解决分布式系统时序问题
@@ -567,6 +651,7 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
     };
 
     // 构建 DatasyncItem，对于业务数据需要查询实际表内容
+    let up_info = datastate::MysqlUpInfo::new();
     let mut items: Vec<DatasyncItem> = Vec::new();
 
     for row in rows {

@@ -156,10 +156,17 @@ async fn m_add_many(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
 async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     ensure_datasync_table(db).await;
 
+    let expected_worker = {
+        let p = base::ProjectPath::find().unwrap_or_default();
+        p.worker_name().unwrap_or_else(|| "local".to_string())
+    };
+
     let dbc = db.clone();
+    let w = expected_worker.clone();
     let rows: Vec<std::collections::HashMap<String, serde_json::Value>> =
         match tokio::task::spawn_blocking(move || {
-            dbc.query_sync("SELECT * FROM datasync WHERE synced = 0 ORDER BY id ASC", &[])
+            dbc.query_sync("SELECT * FROM datasync WHERE synced = 0 AND worker != ? ORDER BY id ASC",
+                &[&w as &dyn rusqlite::ToSql])
         }).await.map_err(|e| format!("spawn_blocking: {}", e)).and_then(|r| r) {
         Ok(r) => r,
         Err(e) => {
