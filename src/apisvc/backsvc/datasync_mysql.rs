@@ -647,10 +647,12 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
         .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
         .unwrap_or_default();
     let tbname = args.first().map(|s| s.as_str()).unwrap_or("").to_string();
+    // jsdata[1]="first" 表示首次全量下载（不使用水位线），否则用增量水位线
+    let use_waterline = args.get(1).map(|s| s.as_str()) != Some("first");
 
     // 查询 synced=1 且 worker != 本地worker 且 id > lastServerId
     let sl = SynclogMysql::new(mysql.clone());
-    let rows = match sl.get_by_worker(&expected_worker, &last_server_id, &tbname, limit) {
+    let rows = match sl.get_by_worker(&expected_worker, &last_server_id, &tbname, limit, use_waterline) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询失败: {}", e), -1);
