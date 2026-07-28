@@ -503,7 +503,15 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
         }
 
         items.push(DatasyncItem {
-            id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            id: {
+                let v = row.get("id");
+                match v {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Number(n)) => n.to_string(),
+                    Some(v) => v.to_string(),
+                    None => String::new(),
+                }
+            },
             apisys: row.get("apisys").and_then(|v| v.as_str()).unwrap_or("v1").to_string(),
             apimicro: row.get("apimicro").and_then(|v| v.as_str()).unwrap_or("iflow").to_string(),
             apiobj: row.get("apiobj").and_then(|v| v.as_str()).unwrap_or("synclog").to_string(),
@@ -697,7 +705,15 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
         }
 
         items.push(DatasyncItem {
-            id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            id: {
+                let v = row.get("id");
+                match v {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Number(n)) => n.to_string(),
+                    Some(v) => v.to_string(),
+                    None => String::new(),
+                }
+            },
             apisys: row.get("apisys").and_then(|v| v.as_str()).unwrap_or("v1").to_string(),
             apimicro: row.get("apimicro").and_then(|v| v.as_str()).unwrap_or("iflow").to_string(),
             apiobj: row.get("apiobj").and_then(|v| v.as_str()).unwrap_or("synclog").to_string(),
