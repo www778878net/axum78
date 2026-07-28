@@ -188,6 +188,7 @@ pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (
         "get" => get(&up, &mysql, &user_cid).await,
         "getbyworker" => get_by_worker(&up, &mysql, &user_cid).await,
         "dowork" => do_work(&up, &mysql).await,
+        "snapsync" => snap_sync(&up, &mysql).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
@@ -620,6 +621,32 @@ fn row_to_synclog_item(row: &HashMap<String, Value>) -> DatasyncItem {
     }
 }
 
+/// 获取 synclog 快照点：当前水位线前的最大雪花 ID
+/// 客户端全量下载完原表后调用，作为增量同步的起点
+async fn snap_sync(up: &UpInfo, mysql: &Mysql78) -> (StatusCode, Bytes) {
+    let args: Vec<String> = up.jsdata.as_ref()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .unwrap_or_default();
+    let tbname = args.first().map(|s| s.as_str()).unwrap_or("").to_string();
+
+    if let Err(e) = ensure_synclog_table(mysql) {
+        let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
+
+    let sl = SynclogMysql::new(mysql.clone());
+    match sl.get_snap_id(&tbname) {
+        Ok(snap_id) => {
+            let resp = Response::success_json(&serde_json::json!({"snap_id": snap_id}));
+            (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+        }
+        Err(e) => {
+            let resp = Response::fail(&format!("获取快照点失败: {}", e), -1);
+            (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+        }
+    }
+}
+
 /// 获取其他客户端的变更记录（过滤本地worker）
 /// 使用雪花id作为增量同步的serverId
 /// 配合5秒安全水位线策略，解决分布式系统时序问题
@@ -647,12 +674,10 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
         .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
         .unwrap_or_default();
     let tbname = args.first().map(|s| s.as_str()).unwrap_or("").to_string();
-    // jsdata[1]="first" 表示首次全量下载（不使用水位线），否则用增量水位线
-    let use_waterline = args.get(1).map(|s| s.as_str()) != Some("first");
 
     // 查询 synced=1 且 worker != 本地worker 且 id > lastServerId
     let sl = SynclogMysql::new(mysql.clone());
-    let rows = match sl.get_by_worker(&expected_worker, &last_server_id, &tbname, limit, use_waterline) {
+    let rows = match sl.get_by_worker(&expected_worker, &last_server_id, &tbname, limit, true) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::fail(&format!("查询失败: {}", e), -1);
