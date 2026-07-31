@@ -486,7 +486,12 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
 
         // 直接下发 synclog 原生的 cmdtext（SQL 语句）和 params
         let cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let params = row.get("params").and_then(|v| v.as_str()).unwrap_or("[]").to_string();
+        // params 存的是 JSON 数组文本如 "[...]"，mysql_value_to_json 会将其解析为 Value::Array
+        let params = match row.get("params") {
+            Some(Value::String(s)) => s.clone(),
+            Some(v) => v.to_string(),
+            None => "[]".to_string(),
+        };
 
         items.push(DatasyncItem {
             id: {
@@ -681,7 +686,12 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
 
         // 直接下发 synclog 原生的 cmdtext（SQL 语句）和 params
         let cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let params = row.get("params").and_then(|v| v.as_str()).unwrap_or("[]").to_string();
+        // params 存的是 JSON 数组文本如 "[...]"，mysql_value_to_json 会将其解析为 Value::Array
+        let params = match row.get("params") {
+            Some(Value::String(s)) => s.clone(),
+            Some(v) => v.to_string(),
+            None => "[]".to_string(),
+        };
 
         items.push(DatasyncItem {
             id: {
