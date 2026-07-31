@@ -33,6 +33,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// CID 映射：旧 UUID → 新雪花ID（仅 steam_scan_queue 表使用雪花CID）
+const OLD_ADMIN_CID: &str = "d4856531-e9d3-20f3-4c22-fe3c65fb009c";
+const NEW_ADMIN_CID: &str = "318225842662547456";
+
+/// 雪花CID专用的表名
+const SNOWFLAKE_CID_TBNAME: &str = "steam_scan_queue";
+
 /// MySQL 连接池（全局单例，延迟初始化）
 static MYSQL_POOL: once_cell::sync::Lazy<Arc<Mutex<Option<Arc<Mysql78>>>>> = 
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
@@ -213,9 +220,8 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
-    // 管理员帐套不需要验证
-    let admin_cid = "d4856531-e9d3-20f3-4c22-fe3c65fb009c";
-    let is_admin = user_cid == admin_cid;
+    // 管理员帐套不需要验证（新旧CID均识别）
+    let is_admin = user_cid == OLD_ADMIN_CID || user_cid == NEW_ADMIN_CID;
 
     let mut success_ids: Vec<String> = Vec::new();
     let mut failed: Vec<FailedItem> = Vec::new();
@@ -367,6 +373,18 @@ fn execute_datasync_item(
     _now: &str,
 ) -> Result<(), String> {
     let mut params: Vec<Value> = serde_json::from_str(&item.params).unwrap_or_default();
+
+    // 仅 steam_scan_queue 表：旧UUID CID → 雪花CID
+    if item.tbname == SNOWFLAKE_CID_TBNAME {
+        for p in params.iter_mut() {
+            if let Some(s) = p.as_str() {
+                if s == OLD_ADMIN_CID {
+                    *p = Value::String(NEW_ADMIN_CID.to_string());
+                }
+            }
+        }
+    }
+
     let up = datastate::MysqlUpInfo::new();
 
     match item.action.as_str() {
