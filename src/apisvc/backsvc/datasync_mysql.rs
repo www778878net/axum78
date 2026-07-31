@@ -484,42 +484,9 @@ async fn get(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, B
         let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-        // 默认 cmdtext 和 params
-        let mut cmdtext = String::new();
-        let params = "[]".to_string(); // 下载时不需要参数
-
-        // 如果需要获取业务数据（insert/update），查询业务表
-        if action == "insert" || action == "update" {
-            if !tbname.is_empty() && !idrow.is_empty() {
-                // 查询业务表最新数据
-                let business_sql = &format!("SELECT * FROM `{}` WHERE id = ?", tbname);
-                let mut business_params = Vec::new();
-                business_params.push(Value::String(idrow.clone()));
-
-                if let Ok(business_rows) = mysql.do_get(business_sql, business_params, &up_info) {
-                    if let Some(business_row) = business_rows.first() {
-                        // 将业务行转换为 JSON 存入 cmdtext
-                        if let Ok(json_str) = serde_json::to_string(business_row) {
-                            cmdtext = json_str;
-                        } else {
-                            cmdtext = "{}".to_string();
-                        }
-                    } else {
-                        cmdtext = "{}".to_string();
-                    }
-                } else {
-                    cmdtext = "{}".to_string();
-                }
-            } else {
-                cmdtext = "{}".to_string();
-            }
-        } else if action == "delete" {
-            // delete 操作不返回业务数据（已删除）
-            cmdtext = "{}".to_string();
-        } else {
-            // 未知操作，保持原有 cmdtext（兼容旧数据）
-            cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        }
+        // 直接下发 synclog 原生的 cmdtext（SQL 语句）和 params
+        let cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let params = row.get("params").and_then(|v| v.as_str()).unwrap_or("[]").to_string();
 
         items.push(DatasyncItem {
             id: {
@@ -712,42 +679,9 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
         let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let idrow = row.get("idrow").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-        // 默认 cmdtext 和 params
-        let mut cmdtext = String::new();
-        let params = "[]".to_string(); // 下载时不需要参数
-
-        // 如果需要获取业务数据（insert/update），查询业务表
-        if action == "insert" || action == "update" {
-            if !tbname.is_empty() && !idrow.is_empty() {
-                // 查询业务表最新数据
-                let business_sql = &format!("SELECT * FROM `{}` WHERE id = ?", tbname);
-                let mut business_params = Vec::new();
-                business_params.push(Value::String(idrow.clone()));
-
-                if let Ok(business_rows) = mysql.do_get(business_sql, business_params, &up_info) {
-                    if let Some(business_row) = business_rows.first() {
-                        // 将业务行转换为 JSON 存入 cmdtext
-                        if let Ok(json_str) = serde_json::to_string(business_row) {
-                            cmdtext = json_str;
-                        } else {
-                            cmdtext = "{}".to_string();
-                        }
-                    } else {
-                        cmdtext = "{}".to_string();
-                    }
-                } else {
-                    cmdtext = "{}".to_string();
-                }
-            } else {
-                cmdtext = "{}".to_string();
-            }
-        } else if action == "delete" {
-            // delete 操作不返回业务数据（已删除）
-            cmdtext = "{}".to_string();
-        } else {
-            // 未知操作，保持原有 cmdtext（兼容旧数据）
-            cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        }
+        // 直接下发 synclog 原生的 cmdtext（SQL 语句）和 params
+        let cmdtext = row.get("cmdtext").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let params = row.get("params").and_then(|v| v.as_str()).unwrap_or("[]").to_string();
 
         items.push(DatasyncItem {
             id: {
