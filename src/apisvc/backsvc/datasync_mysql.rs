@@ -643,13 +643,6 @@ async fn snap_sync(up: &UpInfo, mysql: &Mysql78) -> (StatusCode, Bytes) {
 async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (StatusCode, Bytes) {
     let limit = up.getnumber as i32;
 
-    // 从SID中提取worker（格式：cid|worker）
-    let expected_worker = if up.sid.contains('|') {
-        up.sid.split('|').nth(1).unwrap_or("").to_string()
-    } else {
-        String::new()
-    };
-
     // 获取客户端传递的最后serverid（雪花id），首次同步传 "0"
     let last_server_id = if let Ok(v) = up.mid.parse::<i64>() { if v > 0 { up.mid.clone() } else { "0".to_string() } } else { "0".to_string() };
 
@@ -659,11 +652,13 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
-    // 获取客户端传递的表名过滤（jsdata[0] 按协议传入）
+    // 获取客户端传递的参数：jsdata = [tbname, worker]
+    // worker 用于过滤掉本地客户端的 synclog，避免下载自己上传的数据
     let args: Vec<String> = up.jsdata.as_ref()
         .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
         .unwrap_or_default();
     let tbname = args.first().map(|s| s.as_str()).unwrap_or("").to_string();
+    let expected_worker = args.get(1).map(|s| s.as_str()).unwrap_or("").to_string();
 
     // 查询 synced=1 且 worker != 本地worker 且 id > lastServerId
     let sl = SynclogMysql::new(mysql.clone());
