@@ -231,10 +231,10 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     for mut item in batch.items {
-        // steam_scan_queue 按天分表：将写入目标改写为当天分表名
+        // steam_scan_queue 按天分表：改写 cmdtext 中的原表名为当天分表名
+        // tbname 保持原表名不变，确保 buysell 下载端按原表名能拉到所有天的数据
         if item.tbname == SNOWFLAKE_CID_TBNAME {
             item.cmdtext = rewrite_scan_queue_shard(&item.cmdtext);
-            item.tbname = scan_queue_shard_name();
         }
         let id = if item.id.is_empty() { 
             datastate::next_id_string() 
@@ -736,14 +736,20 @@ fn ensure_synclog_table(mysql: &Mysql78) -> Result<(), String> {
     SynclogMysql::new(mysql.clone()).ensure_tables()
 }
 
-/// steam_scan_queue 按天分表：返回当天分表名
+/// steam_scan_queue 按天分表：返回当天分表名（考虑跨天：00:04 前算昨天）
 fn scan_queue_shard_name() -> String {
-    let today = chrono::Local::now().format("%Y%m%d").to_string();
-    format!("steam_scan_queue_{}", today)
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    let date = if now.hour() == 0 && now.minute() < 4 {
+        now - chrono::Duration::days(1)
+    } else {
+        now
+    };
+    format!("steam_scan_queue_{}", date.format("%Y%m%d"))
 }
 
-/// 将 synclog cmdtext 中的 steam_scan_queue 表名改写为当天分表名
-/// 使用单词边界匹配，避免误改写已带日期后缀的分表名
+/// 将 synclog cmdtext 中独立的 steam_scan_queue 原表名改写为当天分表名
+/// synclog 记录的是原始 table_name（非 table_name_override），需改写成实际分表名
 fn rewrite_scan_queue_shard(cmdtext: &str) -> String {
     let re = regex::Regex::new(r"\bsteam_scan_queue\b").unwrap();
     re.replace_all(cmdtext, scan_queue_shard_name()).to_string()
