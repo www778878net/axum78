@@ -21,7 +21,7 @@ use axum::{
 };
 use base::{UpInfo, Response};
 use datastate::{
-    Mysql78, MysqlConfig, MysqlUpInfo,
+    Mysql78, MysqlConfig,
     data_sync::synclog_mysql::{SynclogMysql, SynclogMysqlItem},
 };
 use prost::Message;
@@ -220,6 +220,9 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
+    // 确保中心 MySQL 当天 steam_scan_queue 分表存在
+    ensure_scan_queue_shard(mysql);
+
     // 管理员帐套不需要验证（新旧CID均识别）
     let is_admin = user_cid == OLD_ADMIN_CID || user_cid == NEW_ADMIN_CID;
 
@@ -227,7 +230,12 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str
     let mut failed: Vec<FailedItem> = Vec::new();
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    for item in batch.items {
+    for mut item in batch.items {
+        // steam_scan_queue 按天分表：将写入目标改写为当天分表名
+        if item.tbname == SNOWFLAKE_CID_TBNAME {
+            item.cmdtext = rewrite_scan_queue_shard(&item.cmdtext);
+            item.tbname = scan_queue_shard_name();
+        }
         let id = if item.id.is_empty() { 
             datastate::next_id_string() 
         } else { 
@@ -726,6 +734,27 @@ async fn get_by_worker(up: &UpInfo, mysql: &Mysql78, expected_cid: &str) -> (Sta
 /// 确保当前 synclog 分表和明天的分表都存在
 fn ensure_synclog_table(mysql: &Mysql78) -> Result<(), String> {
     SynclogMysql::new(mysql.clone()).ensure_tables()
+}
+
+/// steam_scan_queue 按天分表：返回当天分表名
+fn scan_queue_shard_name() -> String {
+    let today = chrono::Local::now().format("%Y%m%d").to_string();
+    format!("steam_scan_queue_{}", today)
+}
+
+/// 将 synclog cmdtext 中的 steam_scan_queue 表名改写为当天分表名
+/// 使用单词边界匹配，避免误改写已带日期后缀的分表名
+fn rewrite_scan_queue_shard(cmdtext: &str) -> String {
+    let re = regex::Regex::new(r"\bsteam_scan_queue\b").unwrap();
+    re.replace_all(cmdtext, scan_queue_shard_name()).to_string()
+}
+
+/// 确保中心 MySQL 当天 steam_scan_queue 分表存在（沿用原表结构）
+fn ensure_scan_queue_shard(mysql: &Mysql78) {
+    let shard = scan_queue_shard_name();
+    let sql = format!("CREATE TABLE IF NOT EXISTS `{}` LIKE `steam_scan_queue`", shard);
+    let up = datastate::MysqlUpInfo::new();
+    let _ = mysql.do_m(&sql, vec![], &up);
 }
 
 // ====== Controller78 实现 ======
