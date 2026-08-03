@@ -22,7 +22,7 @@ use axum::{
 use base::{UpInfo, Response};
 use datastate::{
     Mysql78, MysqlConfig,
-    data_sync::synclog_mysql::{SynclogMysql, SynclogMysqlItem},
+    data_sync::data_sync_mysql::{SynclogMysql, SynclogMysqlItem},
 };
 use prost::Message;
 use serde::{Deserialize, Serialize};
