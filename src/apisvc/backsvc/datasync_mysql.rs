@@ -22,7 +22,7 @@ use axum::{
 use base::{UpInfo, Response};
 use datastate::{
     Mysql78, MysqlConfig,
-    data_sync::data_sync_mysql::{SynclogMysql, SynclogMysqlItem},
+    data_sync::synclog_mysql::{SynclogMysql, SynclogMysqlItem},
 };
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -758,10 +758,14 @@ fn rewrite_scan_queue_shard(cmdtext: &str) -> String {
     re.replace_all(cmdtext, scan_queue_shard_name()).to_string()
 }
 
-/// 确保中心 MySQL 当天 steam_scan_queue 分表存在（沿用原表结构）
+/// 确保中心 MySQL 当天 steam_scan_queue 分表存在
+/// 注意：steam_scan_queue 是 VIEW，不能用 CREATE TABLE LIKE VIEW
 fn ensure_scan_queue_shard(mysql: &Mysql78) {
     let shard = scan_queue_shard_name();
-    let sql = format!("CREATE TABLE IF NOT EXISTS `{}` LIKE `steam_scan_queue`", shard);
+    // 用前一天的分表做模板（steam_scan_queue 本身是 VIEW，LIKE 会失败）
+    let yesterday = chrono::Local::now() - chrono::Duration::days(1);
+    let template = format!("steam_scan_queue_{}", yesterday.format("%Y%m%d"));
+    let sql = format!("CREATE TABLE IF NOT EXISTS `{}` LIKE `{}`", shard, template);
     let up = datastate::MysqlUpInfo::new();
     let _ = mysql.do_m(&sql, vec![], &up);
 }
