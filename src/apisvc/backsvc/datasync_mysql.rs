@@ -555,6 +555,9 @@ async fn do_work(up: &UpInfo, mysql: &Mysql78) -> (StatusCode, Bytes) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
     }
 
+    // 确保当天 steam_scan_queue 分表存在
+    ensure_scan_queue_shard(mysql);
+
     let sl = SynclogMysql::new(mysql.clone());
     let rows = match sl.get_pending(&expected_worker, up.getnumber as i32) {
         Ok(r) => r,
