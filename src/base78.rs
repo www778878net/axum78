@@ -7,10 +7,11 @@
 //! - 权限检查
 //! - 通用CRUD方法
 
-use datastate::{DataState, LocalDB};
+use datastate::{DataState, LocalDB, Mysql78, MysqlUpInfo};
 use base::{MyLogger, UpInfo};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Base78 - 控制器基类
 pub struct Base78 {
@@ -209,6 +210,78 @@ impl CidBase78 {
     }
 
     pub async fn do_get(&self, sql: &str, params: Vec<String>) -> Result<Vec<HashMap<String, Value>>, String> {
+        self.base.do_get(sql, params).await
+    }
+}
+
+// ============ MySQL 版 Base78 ============
+
+/// MysqlBase78 - MySQL 版控制器基类
+///
+/// 对应 NodeJS Base78.ts，内置 get 方法自动拼 SQL，
+/// 子类只需指定表名，不需要手写 SQL。
+///
+/// 用法：
+///   let ctrl = MysqlBase78::new("steam_item_store", "cid", mysql);
+///   let rows = ctrl.get(&up).await?;
+pub struct MysqlBase78 {
+    pub tbname: String,
+    pub uidcid: String,
+    pub mysql: Arc<Mysql78>,
+}
+
+impl MysqlBase78 {
+    pub fn new(tbname: &str, uidcid: &str, mysql: Arc<Mysql78>) -> Self {
+        Self {
+            tbname: tbname.to_string(),
+            uidcid: uidcid.to_string(),
+            mysql,
+        }
+    }
+
+    /// 通用只读查询（对应 NodeJS Base78.get，第759行）
+    ///
+    /// SQL: SELECT * FROM {tbname} WHERE {uidcid}=? ORDER BY {up.order} LIMIT {up.getnumber} OFFSET {up.getstart}
+    pub async fn get(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
+        let order = if up.order.is_empty() { "idpk DESC".to_string() } else { up.order.clone() };
+
+        let sql = format!(
+            "SELECT * FROM `{}` WHERE `{}` = ? ORDER BY {} LIMIT {} OFFSET {}",
+            self.tbname, self.uidcid, order, up.getnumber, up.getstart
+        );
+
+        let up_info = datastate::MysqlUpInfo::new();
+        let params = vec![Value::String(up.cid.clone())];
+
+        self.mysql.do_get(&sql, params, &up_info)
+            .map_err(|e| format!("查询失败: {}", e))
+    }
+
+    /// 自定义查询
+    pub async fn do_get(&self, sql: &str, params: Vec<Value>) -> Result<Vec<HashMap<String, Value>>, String> {
+        let up_info = datastate::MysqlUpInfo::new();
+        self.mysql.do_get(sql, params, &up_info)
+            .map_err(|e| format!("查询失败: {}", e))
+    }
+}
+
+/// MysqlCidBase78 - MySQL 版基于 CID 隔离的控制器基类
+pub struct MysqlCidBase78 {
+    pub base: MysqlBase78,
+}
+
+impl MysqlCidBase78 {
+    pub fn new(tbname: &str, mysql: Arc<Mysql78>) -> Self {
+        Self {
+            base: MysqlBase78::new(tbname, "cid", mysql),
+        }
+    }
+
+    pub async fn get(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
+        self.base.get(up).await
+    }
+
+    pub async fn do_get(&self, sql: &str, params: Vec<Value>) -> Result<Vec<HashMap<String, Value>>, String> {
         self.base.do_get(sql, params).await
     }
 }
