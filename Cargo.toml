@@ -3,6 +3,10 @@ name = "axum78"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+datasync_mysql = []
+
 [dependencies]
 # Web 框架
 axum = "0.7"
