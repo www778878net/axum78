@@ -154,7 +154,7 @@ fn get_mysql_config() -> MysqlConfig {
 }
 
 /// 获取 MySQL 连接（延迟初始化）
-fn get_mysql_connection() -> Result<Arc<Mysql78>, String> {
+pub fn get_mysql_connection() -> Result<Arc<Mysql78>, String> {
     let pool = MYSQL_POOL.clone();
     let mut pool_guard = pool.lock().map_err(|e| format!("获取连接池锁失败: {}", e))?;
     

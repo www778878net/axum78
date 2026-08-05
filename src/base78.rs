@@ -7,11 +7,16 @@
 //! - 权限检查
 //! - 通用CRUD方法
 
+use axum::{
+    body::Bytes,
+    http::{Method, StatusCode},
+};
 use datastate::{DataState, LocalDB, Mysql78, MysqlUpInfo};
-use base::{MyLogger, UpInfo};
+use base::{MyLogger, Response, UpInfo};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use crate::{Controller78, async_trait};
 
 /// Base78 - 控制器基类
 pub struct Base78 {
@@ -283,6 +288,57 @@ impl MysqlCidBase78 {
 
     pub async fn do_get(&self, sql: &str, params: Vec<Value>) -> Result<Vec<HashMap<String, Value>>, String> {
         self.base.do_get(sql, params).await
+    }
+
+    /// 内置 call 分发（health / get），子类无需手写
+    async fn _call(&self, up: &mut UpInfo, fun: &str) -> Value {
+        let up_clone = up.clone();
+        let result: (StatusCode, Bytes) = match fun.to_lowercase().as_str() {
+            "health" => {
+                let resp = Response::success_json(&serde_json::json!({"status": "OK"}));
+                (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+            }
+            "get" => {
+                match self.get(&up_clone).await {
+                    Ok(rows) => {
+                        let arr: Vec<Value> = rows.iter()
+                            .map(|row| serde_json::to_value(row).unwrap_or(Value::Null))
+                            .collect();
+                        let resp = Response::success_json(&Value::Array(arr));
+                        (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+                    }
+                    Err(e) => {
+                        let resp = Response::fail(&e, -1);
+                        (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+                    }
+                }
+            }
+            _ => {
+                let resp = Response::fail(&format!("API not found: {}", fun), 404);
+                (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+            }
+        };
+
+        let resp: Value = serde_json::from_slice(&result.1).unwrap_or(Value::Null);
+        if result.0 != StatusCode::OK {
+            up.res = -1;
+            up.errmsg = resp.get("errmsg").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            return Value::Null;
+        }
+        resp.get("back").and_then(|v| {
+            if let Some(s) = v.as_str() {
+                serde_json::from_str(s).ok()
+            } else {
+                Some(v.clone())
+            }
+        }).unwrap_or(Value::Null)
+    }
+}
+
+#[async_trait]
+impl Controller78 for MysqlCidBase78 {
+    async fn call(&self, up: &mut UpInfo, fun: &str, _method: &Method) -> Value {
+        self._call(up, fun).await
     }
 }
 
