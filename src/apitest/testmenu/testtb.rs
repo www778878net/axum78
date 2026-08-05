@@ -1,179 +1,123 @@
-//! testtb - MySQL 通用只读 Controller 示例
+//! testtb - 示范：如何给表加自定义函数
 //!
 //! 路径: apitest/testmenu/testtb
 //! 路由: POST /apitest/testmenu/testtb/:apifun
 //!
-//! 使用 axum78 基框架的 MysqlCidBase78，get 方法自动拼 SQL，
-//! 不需要手写 SQL。对应 NodeJS：
-//!   class testtb extends CidBase78 {}  // 空类就有全部功能
+//! 对应 NodeJS: class testtb extends CidBase78 { async my_fn() {} }
 //!
-//! 每个 API 一个独立函数（health、get、test），和 logsvc 一样。
+//! 两种写法：
+//!   方式一（空壳）：直接用 MysqlCidBase78，拥有 health + get，不需要写任何方法
+//!   方式二（包装）：包一层 struct 实现 Controller78，加自定义函数，未匹配的 fallback 给基类
 
-use axum::{
-    body::Bytes,
-    http::{Method, StatusCode},
-};
-use base::{UpInfo, Response};
-use datastate::{Mysql78, MysqlConfig};
-use crate::VerifyResult;
-use crate::router::Controller78;
-use crate::MysqlCidBase78;
-use async_trait::async_trait;
+use axum::http::Method;
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
-use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-// ============ MySQL 连接池 ============
+use crate::{Controller78, async_trait, MysqlCidBase78, Mysql78};
 
-static MYSQL_POOL: Lazy<Arc<Mutex<Option<Arc<Mysql78>>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(None)));
+// ============================================================
+// 方式一：空壳（注释掉，下面用方式二示范）
+// ============================================================
+// #[cfg(feature = "datasync_mysql")]
+// pub fn register_controller() {
+//     let mysql = crate::apisvc::backsvc::datasync_mysql::get_mysql_connection()
+//         .expect("MySQL 连接失败");
+//     crate::router::registry::register(
+//         "apitest/testmenu/testtb",
+//         Arc::new(MysqlCidBase78::new("testtb", mysql)),
+//     );
+// }
 
-fn get_mysql_config() -> MysqlConfig {
-    if let Ok(host) = std::env::var("MYSQL_HOST") {
-        return MysqlConfig {
-            host,
-            port: std::env::var("MYSQL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3306),
-            user: std::env::var("MYSQL_USER").unwrap_or_else(|_| "root".to_string()),
-            password: std::env::var("MYSQL_PASSWORD").unwrap_or_default(),
-            database: std::env::var("MYSQL_DATABASE").unwrap_or_else(|_| "testdb".to_string()),
-            max_connections: std::env::var("MYSQL_MAX_CONNECTIONS").ok().and_then(|p| p.parse().ok()).unwrap_or(10),
-            is_log: false,
-            is_count: false,
-        };
-    }
-    if let Ok(p) = base::ProjectPath::find() {
-        if let Ok(ini) = p.load_ini_config() {
-            if let Some(mysql_section) = ini.get("mysql") {
-                let host = mysql_section.get("host").cloned().unwrap_or_default();
-                let port = mysql_section.get("port").and_then(|s| s.parse().ok()).unwrap_or(3306);
-                let user = mysql_section.get("user").cloned().unwrap_or_default();
-                let password = mysql_section.get("password").cloned().unwrap_or_default();
-                let database = mysql_section.get("database").cloned().unwrap_or_default();
-                if !host.is_empty() && !user.is_empty() && !database.is_empty() {
-                    return MysqlConfig {
-                        host, port, user, password, database,
-                        max_connections: mysql_section.get("max_connections").and_then(|s| s.parse().ok()).unwrap_or(10),
-                        is_log: mysql_section.get("is_log").and_then(|s| s.parse().ok()).unwrap_or(false),
-                        is_count: mysql_section.get("is_count").and_then(|s| s.parse().ok()).unwrap_or(false),
-                    };
-                }
-            }
-        }
-    }
-    MysqlConfig {
-        host: "127.0.0.1".to_string(), port: 3306,
-        user: "root".to_string(), password: String::new(),
-        database: "testdb".to_string(), max_connections: 10,
-        is_log: false, is_count: false,
-    }
+// ============================================================
+// 方式二：包装 struct，加自定义函数
+// ============================================================
+
+#[cfg(feature = "datasync_mysql")]
+pub fn register_controller() {
+    let mysql = crate::apisvc::backsvc::datasync_mysql::get_mysql_connection()
+        .expect("MySQL 连接失败");
+    crate::router::registry::register(
+        "apitest/testmenu/testtb",
+        Arc::new(Testtb::new(mysql)),
+    );
 }
 
-fn get_mysql_connection() -> Result<Arc<Mysql78>, String> {
-    let pool = MYSQL_POOL.clone();
-    let mut pool_guard = pool.lock().map_err(|e| format!("获取连接池锁失败: {}", e))?;
-    if pool_guard.is_none() {
-        let config = get_mysql_config();
-        let mut mysql = Mysql78::new(config);
-        mysql.initialize()?;
-        *pool_guard = Some(Arc::new(mysql));
-    }
-    Ok(pool_guard.as_ref().unwrap().clone())
-}
-
-// ============ API 处理器（每个 API 一个独立函数）============
-
-async fn health() -> (StatusCode, Bytes) {
-    let resp = Response::success_json(&serde_json::json!({"status": "OK"}));
-    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-}
-
-async fn test(up: &UpInfo) -> (StatusCode, Bytes) {
-    let resp = Response::success_json(&serde_json::json!({
-        "message": "testtb test ok",
-        "sid": up.sid
-    }));
-    (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-}
-
-/// get - 通用只读查询（基类自动拼 SQL）
-async fn get(up: &UpInfo, base: &MysqlCidBase78) -> (StatusCode, Bytes) {
-    match base.get(up).await {
-        Ok(rows) => {
-            let arr: Vec<Value> = rows.iter()
-                .map(|row| serde_json::to_value(row).unwrap_or(Value::Null))
-                .collect();
-            let resp = Response::success_json(&Value::Array(arr));
-            (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-        }
-        Err(e) => {
-            let resp = Response::fail(&e, -1);
-            (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-        }
-    }
-}
-
-/// handle - 分发到各 API 函数
-pub fn handle(apifun: &str, up: UpInfo, base: &MysqlCidBase78) -> (StatusCode, Bytes) {
-    match apifun.to_lowercase().as_str() {
-        "health" => {
-            let (status, bytes) = tokio::runtime::Handle::current().block_on(health());
-            (status, bytes)
-        }
-        "get" => {
-            let (status, bytes) = tokio::runtime::Handle::current().block_on(get(&up, base));
-            (status, bytes)
-        }
-        "test" => {
-            let (status, bytes) = tokio::runtime::Handle::current().block_on(test(&up));
-            (status, bytes)
-        }
-        _ => {
-            let resp = Response::fail(&format!("API not found: {}", apifun), 404);
-            (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-        }
-    }
-}
-
-// ============ Controller78 实现 ============
-
-/// testtb 控制器 —— 对应 NodeJS: class testtb extends CidBase78 {}
-pub struct TesttbController {
+/// Testtb 包装 MysqlCidBase78，添加自定义业务方法
+pub struct Testtb {
     base: MysqlCidBase78,
 }
 
-impl TesttbController {
-    pub fn new() -> Self {
-        let mysql = get_mysql_connection().expect("MySQL 连接失败");
+impl Testtb {
+    pub fn new(mysql: Arc<Mysql78>) -> Self {
         Self {
             base: MysqlCidBase78::new("testtb", mysql),
         }
     }
-}
 
-#[async_trait]
-impl Controller78 for TesttbController {
-    async fn call(&self, up: &mut crate::UpInfo, fun: &str, _method: &Method) -> Value {
-        let up_clone = up.clone();
-        let (status, bytes) = handle(fun, up_clone, &self.base);
-        let resp: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    // ========== 自定义业务方法 ==========
 
-        if status != StatusCode::OK {
-            up.res = -1;
-            up.errmsg = resp.get("errmsg").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            return Value::Null;
-        }
+    /// test —— 简单 echo，前端调用 POST /apitest/testmenu/testtb/test
+    pub async fn test(&self, up: &crate::UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
+        let mut map = HashMap::new();
+        map.insert("message".to_string(), Value::String("testtb ok".to_string()));
+        map.insert("sid".to_string(), Value::String(up.sid.clone()));
+        Ok(vec![map])
+    }
 
-        resp.get("back").and_then(|v| {
-            if let Some(s) = v.as_str() {
-                serde_json::from_str(s).ok()
-            } else {
-                Some(v.clone())
-            }
-        }).unwrap_or(Value::Null)
+    /// count —— 统计该用户记录数，前端调用 POST /apitest/testmenu/testtb/count
+    pub async fn count(&self, up: &crate::UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
+        let sql = format!("SELECT COUNT(*) AS total FROM `testtb` WHERE `cid` = ?");
+        self.base.do_get(&sql, vec![Value::String(up.cid.clone())]).await
+    }
+
+    /// list_by_date —— 自定义条件查询
+    /// 前端调用 POST /apitest/testmenu/testtb/list_by_date
+    /// body: { cid, date: "2025-08-05" }
+    pub async fn list_by_date(&self, up: &crate::UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
+        let jsdata: Value = serde_json::from_str(
+            up.jsdata.as_deref().unwrap_or("{}")
+        ).unwrap_or(Value::Null);
+        let date = jsdata.get("date").and_then(|v| v.as_str()).unwrap_or("");
+        let sql = format!(
+            "SELECT * FROM `testtb` WHERE `cid` = ? AND `uptime` LIKE ? ORDER BY `idpk` DESC"
+        );
+        self.base.do_get(&sql, vec![
+            Value::String(up.cid.clone()),
+            Value::String(format!("{}%", date)),
+        ]).await
     }
 }
 
-/// 注册到全局路由表
-pub fn register_controller() {
-    crate::router::registry::register("apitest/testmenu/testtb", Arc::new(TesttbController::new()));
+// ========== Controller78 trait 实现 ==========
+
+#[async_trait]
+impl Controller78 for Testtb {
+    async fn call(&self, up: &mut crate::UpInfo, fun: &str, method: &Method) -> Value {
+        let up_clone = up.clone();
+
+        // 先匹配自定义函数
+        let result: Result<Vec<HashMap<String, Value>>, String> = match fun {
+            "test" => self.test(&up_clone).await,
+            "count" => self.count(&up_clone).await,
+            "list_by_date" => self.list_by_date(&up_clone).await,
+            // 没匹配到 → fallback 给基类（health / get）
+            _ => return self.base.call(up, fun, method).await,
+        };
+
+        // 统一返回
+        match result {
+            Ok(rows) => {
+                let arr: Vec<Value> = rows.iter()
+                    .map(|row| serde_json::to_value(row).unwrap_or(Value::Null))
+                    .collect();
+                Value::Array(arr)
+            }
+            Err(e) => {
+                up.res = -1;
+                up.errmsg = e;
+                Value::Null
+            }
+        }
+    }
 }
