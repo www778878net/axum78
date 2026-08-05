@@ -13,6 +13,7 @@ async fn main() {
     axum78::apisvc::backsvc::datasync::register_controller();
     #[cfg(feature = "datasync_mysql")]
     axum78::apisvc::backsvc::datasync_mysql::register_controller();
+    #[cfg(feature = "datasync_mysql")]
     axum78::apitest::testmenu::testtb::register_controller();
     axum78::apigame::mock::game_state::register_controller();
 

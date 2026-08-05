@@ -6,7 +6,7 @@
 //! 对应 NodeJS: class testtb extends CidBase78 { async my_fn() {} }
 //!
 //! 两种写法：
-//!   方式一（空壳）：直接用 MysqlCidBase78，拥有 health + get，不需要写任何方法
+//!   方式一（空壳）：直接用 MysqlCidBase78，拥有 get，不需要写任何方法
 //!   方式二（包装）：包一层 struct 实现 Controller78，加自定义函数，未匹配的 fallback 给基类
 
 use axum::http::Method;
@@ -101,7 +101,7 @@ impl Controller78 for Testtb {
             "test" => self.test(&up_clone).await,
             "count" => self.count(&up_clone).await,
             "list_by_date" => self.list_by_date(&up_clone).await,
-            // 没匹配到 → fallback 给基类（health / get）
+            // 没匹配到 → fallback 给基类（get）
             _ => return self.base.call(up, fun, method).await,
         };
 

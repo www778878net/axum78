@@ -290,14 +290,10 @@ impl MysqlCidBase78 {
         self.base.do_get(sql, params).await
     }
 
-    /// 内置 call 分发（health / get），子类无需手写
+    /// 内置 call 分发（get），子类无需手写
     async fn _call(&self, up: &mut UpInfo, fun: &str) -> Value {
         let up_clone = up.clone();
         let result: (StatusCode, Bytes) = match fun.to_lowercase().as_str() {
-            "health" => {
-                let resp = Response::success_json(&serde_json::json!({"status": "OK"}));
-                (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
-            }
             "get" => {
                 match self.get(&up_clone).await {
                     Ok(rows) => {

@@ -11,11 +11,12 @@
 use axum::{
     body::{Body, Bytes},
     Router,
-    routing::any,
+    routing::{any, get},
     extract::{Path, Extension, Request},
     response::IntoResponse,
     http::{header, HeaderMap, StatusCode, Uri, Method},
     middleware,
+    Json,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -199,6 +200,7 @@ fn build_router(state: Arc<RouterState>) -> Router<()> {
         .layer(middleware::from_fn(sid_auth_middleware));
 
     Router::new()
+        .route("/health", get(|| async { Json(serde_json::json!({"status": "OK"})) }))
         .nest("/apiopen", open_router)
         .merge(auth_router)
         .layer(cors)
@@ -228,11 +230,11 @@ where
         .layer(middleware::from_fn(sid_auth_middleware));
 
     Router::new()
+        .route("/health", get(|| async { Json(serde_json::json!({"status": "OK"})) }))
         .nest("/apiopen", open_router)
         .merge(auth_router)
         .layer(cors)
 }
-
 fn forbidden() -> (StatusCode, [(axum::http::HeaderName, &'static str); 1], Bytes) {
     (
         StatusCode::FORBIDDEN,
