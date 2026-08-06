@@ -28,7 +28,8 @@ async fn main() {
     tracing::info!("同步服务器启动: http://{}", addr);
     tracing::info!("端点:");
     tracing::info!("  POST /:apisys/:apimicro/:apiobj/:apifun - 4级路由API");
-    tracing::info!("  POST /apisvc/backsvc/datasync/maddmany - 上传同步记录");
+    tracing::info!("  POST /apisvc/backsvc/datasync/madd - 上传单条同步记录(protobuf+base64)");
+    tracing::info!("  POST /apisvc/backsvc/datasync/maddmany - 上传批量同步记录");
     tracing::info!("  POST /apisvc/backsvc/datasync/dowork - 执行同步操作");
     tracing::info!("  POST /apisvc/backsvc/datasync/get - 查询同步记录");
 

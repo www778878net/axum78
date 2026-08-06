@@ -4,7 +4,8 @@
 //! 路由: POST /apisvc/backsvc/datasync/:apifun
 //!
 //! API:
-//!   - maddmany: 接收 Worker 上传的 synclog，写入中心 datasync 表 (synced=0)
+//!   - madd:     接收单条 synclog（protobuf + base64 → jsdata），写入中心 datasync 表
+//!   - maddmany: 接收 Worker 上传的批量 synclog，写入中心 datasync 表 (synced=0)
 //!   - dowork:   重放 synced=0 → 业务表，更新 synced 状态
 //!   - get:      按 cid+worker 返回 synced=1 记录 (protobuf)，给其他 Worker 下载
 //!
@@ -73,12 +74,86 @@ pub async fn handle(apifun: &str, up: UpInfo) -> (StatusCode, Bytes) {
     };
 
     match apifun.to_lowercase().as_str() {
+        "madd" => m_add(&up, &db).await,
         "maddmany" => m_add_many(&up, &db).await,
         "dowork" => do_work(&up, &db).await,
         "get" => get(&up, &db).await,
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+        }
+    }
+}
+
+/// 单条添加 synclog（protobuf + base64 → jsdata）
+async fn m_add(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
+    let batch: DatasyncBatch = if let Some(data) = &up.bytedata {
+        match DatasyncBatch::decode(&**data) {
+            Ok(b) => b,
+            Err(e) => {
+                let resp = Response::fail(&format!("解码失败: {}", e), -1);
+                return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+            }
+        }
+    } else if let Some(jsdata) = &up.jsdata {
+        use base64::{Engine as _, engine::general_purpose};
+        match general_purpose::STANDARD.decode(jsdata) {
+            Ok(bytes) => match DatasyncBatch::decode(&*bytes) {
+                Ok(b) => b,
+                Err(e) => {
+                    let resp = Response::fail(&format!("解码失败: {}", e), -1);
+                    return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+                }
+            },
+            Err(e) => {
+                let resp = Response::fail(&format!("Base64解码失败: {}", e), -1);
+                return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+            }
+        }
+    } else {
+        let resp = Response::fail("无bytedata或jsdata", -1);
+        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    };
+
+    if batch.items.is_empty() {
+        let resp = Response::fail("数据为空", -1);
+        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
+
+    ensure_datasync_table(db).await;
+    let item = &batch.items[0];
+    let id = if item.id.is_empty() { datastate::next_id_string() } else { item.id.clone() };
+
+    let sql = "INSERT INTO datasync (id, apisys, apimicro, apiobj, tbname, action, cmdtext, params, idrow, worker, synced, cmdtextmd5, cid, upby) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)";
+    let exec_result = db.execute_with_params(
+        sql,
+        vec![
+            rusqlite::types::Value::Text(id.clone()),
+            rusqlite::types::Value::Text(item.apisys.clone()),
+            rusqlite::types::Value::Text(item.apimicro.clone()),
+            rusqlite::types::Value::Text(item.apiobj.clone()),
+            rusqlite::types::Value::Text(item.tbname.clone()),
+            rusqlite::types::Value::Text(item.action.clone()),
+            rusqlite::types::Value::Text(item.cmdtext.clone()),
+            rusqlite::types::Value::Text(item.params.clone()),
+            rusqlite::types::Value::Text(item.idrow.clone()),
+            rusqlite::types::Value::Text(item.worker.clone()),
+            rusqlite::types::Value::Text(item.cmdtextmd5.clone()),
+            rusqlite::types::Value::Text(item.cid.clone()),
+            rusqlite::types::Value::Text(item.upby.clone()),
+        ],
+    ).await;
+
+    match exec_result {
+        Ok(_) => {
+            println!("[madd] INSERT OK: id={}", id);
+            let resp = Response::success_json(&serde_json::json!({ "id": id }));
+            (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+        }
+        Err(e) => {
+            eprintln!("[madd] INSERT FAIL: id={}, err={}", id, e);
+            let resp = Response::fail(&e, -1);
+            (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
         }
     }
 }

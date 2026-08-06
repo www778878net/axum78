@@ -4,7 +4,8 @@
 //! 路由: POST /apisvc/backsvc/datasync_mysql/:apifun
 //!
 //! API:
-//!   - maddmany:   接收 Worker 上传的 synclog + 执行业务 SQL + cid/uid 权限验证
+//!   - madd:       接收单条 synclog（protobuf + base64 → jsdata）+ 执行业务 SQL + cid/uid 权限验证
+//!   - maddmany:   接收 Worker 上传的批量 synclog + 执行业务 SQL + cid/uid 权限验证
 //!   - get:        查询 synclog_YYYYMMDD (synced=1)，含业务表数据回填，返回 protobuf
 //!   - getbyworker: 增量同步，过滤本地 worker + id 游标 + tbname 过滤
 //!   - dowork:     重放 synced=0 → 业务表，标记 synced=1/-1
@@ -191,6 +192,7 @@ pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (
     };
     
     match apifun.to_lowercase().as_str() {
+        "madd" => m_add(&up, &mysql, &user_cid, &user_uid).await,
         "maddmany" => m_add_many(&up, &mysql, &user_cid, &user_uid).await,
         "get" => get(&up, &mysql, &user_cid).await,
         "getbyworker" => get_by_worker(&up, &mysql, &user_cid).await,
@@ -199,6 +201,65 @@ pub async fn handle(apifun: &str, up: UpInfo, verify_result: &VerifyResult) -> (
         _ => {
             let resp = Response::fail(&format!("API not found: {}", apifun), 404);
             (StatusCode::NOT_FOUND, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+        }
+    }
+}
+
+/// 单条添加 datasync 并执行 SQL（对应 base78.ts mAdd + protobuf jsdata 协议）
+async fn m_add(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str) -> (StatusCode, Bytes) {
+    // 解码请求数据
+    let batch: DatasyncBatch = match decode_batch(up) {
+        Ok(b) => b,
+        Err(e) => {
+            let resp = Response::fail(&e, -1);
+            return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+        }
+    };
+
+    if batch.items.is_empty() {
+        let resp = Response::fail("数据为空", -1);
+        return (StatusCode::BAD_REQUEST, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
+
+    let item = &batch.items[0];
+
+    // 确保 synclog 分表存在
+    if let Err(e) = ensure_synclog_table(mysql) {
+        let resp = Response::fail(&format!("创建synclog表失败: {}", e), -1);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+    }
+
+    // 管理员帐套不需要验证
+    let is_admin = user_cid == OLD_ADMIN_CID || user_cid == NEW_ADMIN_CID;
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // 权限验证
+    if !is_admin {
+        let validation = validate_cid_uid(mysql, item, user_cid, user_uid);
+        if let Err(e) = validation {
+            let resp = Response::fail(&e, -1);
+            return (StatusCode::FORBIDDEN, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
+        }
+    }
+
+    let id = if item.id.is_empty() {
+        datastate::next_id_string()
+    } else {
+        item.id.clone()
+    };
+
+    // 执行 SQL
+    match execute_datasync_item(mysql, item, user_cid, &now) {
+        Ok(_) => {
+            let _ = insert_synclog(mysql, item, &id, user_cid, 1, "", &now, &up.uname);
+            let result = serde_json::json!({ "id": id });
+            let resp = Response::success_json(&result);
+            (StatusCode::OK, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
+        }
+        Err(e) => {
+            let _ = insert_synclog(mysql, item, &id, user_cid, -1, &e, &now, &up.uname);
+            let resp = Response::fail(&e, -1);
+            (StatusCode::INTERNAL_SERVER_ERROR, Bytes::from(serde_json::to_string(&resp).unwrap_or_default()))
         }
     }
 }
