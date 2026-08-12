@@ -39,7 +39,8 @@ const OLD_ADMIN_CID: &str = "d4856531-e9d3-20f3-4c22-fe3c65fb009c";
 const NEW_ADMIN_CID: &str = "318225842662547456";
 
 /// 雪花CID专用的表名
-const SNOWFLAKE_CID_TBNAME: &str = "steam_scan_queue";
+/// steam_scan_queue 分表名前缀，用于 CID 转换匹配
+const SCAN_QUEUE_TBNAME_PREFIX: &str = "steam_scan_queue_";
 
 /// MySQL 连接池（全局单例，延迟初始化）
 static MYSQL_POOL: once_cell::sync::Lazy<Arc<Mutex<Option<Arc<Mysql78>>>>> = 
@@ -292,11 +293,8 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     for mut item in batch.items {
-        // steam_scan_queue 按天分表：改写 cmdtext 中的原表名为当天分表名
-        // tbname 保持原表名不变，确保 buysell 下载端按原表名能拉到所有天的数据
-        if item.tbname == SNOWFLAKE_CID_TBNAME {
-            item.cmdtext = rewrite_scan_queue_shard(&item.cmdtext);
-        }
+        // tbname 已经是分表名（如 steam_scan_queue_20260812），cmdtext 中的 SQL 也直接是分表名，
+        // 不再需要 rewrite。
         let id = if item.id.is_empty() { 
             datastate::next_id_string() 
         } else { 
@@ -443,8 +441,8 @@ fn execute_datasync_item(
 ) -> Result<(), String> {
     let mut params: Vec<Value> = serde_json::from_str(&item.params).unwrap_or_default();
 
-    // 仅 steam_scan_queue 表：旧UUID CID → 雪花CID
-    if item.tbname == SNOWFLAKE_CID_TBNAME {
+    // 仅 steam_scan_queue 分表：旧UUID CID → 雪花CID（tbname 现在是分表名，用前缀匹配）
+    if item.tbname.starts_with(SCAN_QUEUE_TBNAME_PREFIX) {
         for p in params.iter_mut() {
             if let Some(s) = p.as_str() {
                 if s == OLD_ADMIN_CID {
@@ -810,13 +808,6 @@ fn scan_queue_shard_name() -> String {
         now
     };
     format!("steam_scan_queue_{}", date.format("%Y%m%d"))
-}
-
-/// 将 synclog cmdtext 中独立的 steam_scan_queue 原表名改写为当天分表名
-/// synclog 记录的是原始 table_name（非 table_name_override），需改写成实际分表名
-fn rewrite_scan_queue_shard(cmdtext: &str) -> String {
-    let re = regex::Regex::new(r"\bsteam_scan_queue\b").unwrap();
-    re.replace_all(cmdtext, scan_queue_shard_name()).to_string()
 }
 
 /// 确保中心 MySQL 当天 steam_scan_queue 分表存在
