@@ -810,16 +810,58 @@ fn scan_queue_shard_name() -> String {
     format!("steam_scan_queue_{}", date.format("%Y%m%d"))
 }
 
-/// 确保中心 MySQL 当天 steam_scan_queue 分表存在
+/// 确保中心 MySQL 当天 + 明天 steam_scan_queue 分表存在
 /// 注意：steam_scan_queue 是 VIEW，不能用 CREATE TABLE LIKE VIEW
+///
+/// 背景：百度 buysell 会提前跨天创建任务（如 8-12 晚 23:54 上传 8-13 的任务），
+/// 若只建"当天"分表，跨天任务 INSERT 到不存在的明天分表会报 ERROR 1146 全部失败。
+/// 因此必须同时确保当天和明天的分表都存在。
 fn ensure_scan_queue_shard(mysql: &Mysql78) {
-    let shard = scan_queue_shard_name();
-    // 用前一天的分表做模板（steam_scan_queue 本身是 VIEW，LIKE 会失败）
-    let yesterday = chrono::Local::now() - chrono::Duration::days(1);
-    let template = format!("steam_scan_queue_{}", yesterday.format("%Y%m%d"));
-    let sql = format!("CREATE TABLE IF NOT EXISTS `{}` LIKE `{}`", shard, template);
     let up = datastate::MysqlUpInfo::new();
-    let _ = mysql.do_m(&sql, vec![], &up);
+    let now = chrono::Local::now();
+
+    // 需要确保存在的分表日期：今天 + 明天
+    let today = now.format("%Y%m%d").to_string();
+    let tomorrow = (now + chrono::Duration::days(1)).format("%Y%m%d").to_string();
+
+    // 用已存在的分表做模板（向前最多回溯 3 天，总能找到一个已建的分表）
+    let mut template: Option<String> = None;
+    for offset in 1..=3 {
+        let candidate = (now - chrono::Duration::days(offset))
+            .format("%Y%m%d")
+            .to_string();
+        let check = format!(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'steam_scan_queue_{}'",
+            candidate
+        );
+        // do_get 返回 Vec<HashMap<列名, Value>>，COUNT(*) 的值取第一行的第一个 value
+        let count = mysql
+            .do_get(&check, vec![], &up)
+            .ok()
+            .and_then(|rows| {
+                rows.first()
+                    .and_then(|r| r.values().next().cloned())
+            })
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .unwrap_or(0);
+        if count > 0 {
+            template = Some(candidate);
+            break;
+        }
+    }
+
+    let template = match template {
+        Some(t) => t,
+        None => return, // 找不到模板分表，无法建表（首次部署需手动建表）
+    };
+
+    for shard in [&today, &tomorrow] {
+        let sql = format!(
+            "CREATE TABLE IF NOT EXISTS `steam_scan_queue_{}` LIKE `steam_scan_queue_{}`",
+            shard, template
+        );
+        let _ = mysql.do_m(&sql, vec![], &up);
+    }
 }
 
 // ====== Controller78 实现 ======
