@@ -798,18 +798,6 @@ fn ensure_synclog_table(mysql: &Mysql78) -> Result<(), String> {
     SynclogMysql::new(mysql.clone()).ensure_tables()
 }
 
-/// steam_scan_queue 按天分表：返回当天分表名（考虑跨天：00:04 前算昨天）
-fn scan_queue_shard_name() -> String {
-    use chrono::Timelike;
-    let now = chrono::Local::now();
-    let date = if now.hour() == 0 && now.minute() < 4 {
-        now - chrono::Duration::days(1)
-    } else {
-        now
-    };
-    format!("steam_scan_queue_{}", date.format("%Y%m%d"))
-}
-
 /// 确保中心 MySQL 当天 + 明天 steam_scan_queue 分表存在
 /// 注意：steam_scan_queue 是 VIEW，不能用 CREATE TABLE LIKE VIEW
 ///
