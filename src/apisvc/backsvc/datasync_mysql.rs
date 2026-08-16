@@ -232,7 +232,7 @@ async fn m_add(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str) -> 
 
     // 管理员帐套不需要验证
     let is_admin = user_cid == OLD_ADMIN_CID || user_cid == NEW_ADMIN_CID;
-    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     // 权限验证
     if !is_admin {
@@ -290,7 +290,7 @@ async fn m_add_many(up: &UpInfo, mysql: &Mysql78, user_cid: &str, user_uid: &str
 
     let mut success_ids: Vec<String> = Vec::new();
     let mut failed: Vec<FailedItem> = Vec::new();
-    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     for mut item in batch.items {
         // tbname 已经是分表名（如 steam_scan_queue_20260812），cmdtext 中的 SQL 也直接是分表名，
@@ -626,7 +626,7 @@ async fn do_work(up: &UpInfo, mysql: &Mysql78) -> (StatusCode, Bytes) {
         }
     };
 
-    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut success = 0i32;
     let mut failed = 0i32;
     let mut errors: Vec<serde_json::Value> = Vec::new();
