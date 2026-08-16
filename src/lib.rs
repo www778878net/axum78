@@ -42,6 +42,7 @@ pub const SYNCLOG_CREATE_SQL: &str = r#"CREATE TABLE IF NOT EXISTS synclog (
 pub use response::{ApiResponse, ApiError};
 pub use base_api::{BaseApi, TableConfig};
 pub use router::{ApiRouter78, Controller78, create_router, create_router_with_custom};
+pub use router::registry::{register, register_route, lookup};
 pub use server::Server;
 
 pub use async_trait::async_trait;

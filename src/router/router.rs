@@ -9,12 +9,12 @@
 //! - apimicro 不能以 "dll" 开头
 
 use axum::{
-    body::{Body, Bytes},
+    body::Bytes,
     Router,
     routing::{any, get},
-    extract::{Path, Extension, Request},
+    extract::Extension,
     response::IntoResponse,
-    http::{header, HeaderMap, StatusCode, Uri, Method},
+    http::{header, StatusCode, Method},
     middleware,
     Json,
 };
@@ -23,7 +23,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{ApiResponse, UpInfo, RequestBody, Response, VerifyResult, sid_auth_middleware};
+use crate::{ApiResponse, UpInfo, Response, sid_auth_middleware};
 use tower_http::cors::{CorsLayer, Any};
 
 /// 控制器 Trait - 实现此 trait 来定义 API 处理器
@@ -36,20 +36,17 @@ pub trait Controller78: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct RouterState {
     pub controllers: HashMap<String, Arc<dyn Controller78>>,
-    pub open_controllers: HashMap<String, Arc<dyn Controller78>>,
 }
 
 /// 4级路由构建器
 pub struct ApiRouter78 {
     controllers: HashMap<String, Arc<dyn Controller78>>,
-    open_controllers: HashMap<String, Arc<dyn Controller78>>,
 }
 
 impl ApiRouter78 {
     pub fn new() -> Self {
         Self {
             controllers: HashMap::new(),
-            open_controllers: HashMap::new(),
         }
     }
 
@@ -58,69 +55,9 @@ impl ApiRouter78 {
         self
     }
 
-    pub fn register_open<C: Controller78>(mut self, path: &str, controller: C) -> Self {
-        self.open_controllers.insert(path.to_string(), Arc::new(controller));
-        self
-    }
-
-    /// 消耗构建器，返回 controllers 和 open_controllers
-    pub fn build(self) -> (HashMap<String, Arc<dyn Controller78>>, HashMap<String, Arc<dyn Controller78>>) {
-        (self.controllers, self.open_controllers)
-    }
-}
-
-/// 公开路由处理器 (无认证中间件)
-async fn open_api_handler(
-    Extension(state): Extension<Arc<RouterState>>,
-    Path((apimicro, apiobj, apifun)): Path<(String, String, String)>,
-    uri: Uri,
-    method: Method,
-    request: Request,
-) -> impl IntoResponse {
-    let apimicro_lower = apimicro.to_lowercase();
-    let apifun_lower = apifun.to_lowercase();
-
-    if apifun.starts_with('_') {
-        return forbidden();
-    }
-    if apimicro_lower.starts_with("dll") {
-        return forbidden();
-    }
-
-    let body_bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024).await.unwrap_or_default();
-
-    let controller_path = format!("{}/{}", apimicro, apiobj);
-    if let Some(controller) = state.open_controllers.get(&controller_path) {
-        let mut up = UpInfo::default();
-        up.apisys = "apiopen".to_string();
-        up.apimicro = apimicro.clone();
-        up.apiobj = apiobj.clone();
-        up.apifun = apifun.clone();
-        if !body_bytes.is_empty() {
-            if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
-                up.jsdata = Some(body_str.to_string());
-            }
-        }
-        if let Some(query_str) = uri.query() {
-            up.source = query_str.to_string();
-        }
-
-        let result = controller.call(&mut up, &apifun_lower, &method).await;
-        if up.res != 0 {
-            return bad_request(up.errmsg, up.res);
-        }
-        let resp = ApiResponse::success(result);
-        return (StatusCode::OK, content_type_json(), Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-    }
-
-    match (apimicro_lower.as_str(), apiobj.as_str()) {
-        ("wework", "auth") => {
-            return crate::apiopen::wework::auth::handle_raw(&apifun_lower, body_bytes).await;
-        }
-        _ => {
-            let resp = Response::fail(&format!("API not found: apiopen/{}/{}/{}", apimicro, apiobj, apifun), 404);
-            return (StatusCode::NOT_FOUND, content_type_json(), Bytes::from(serde_json::to_string(&resp).unwrap_or_default()));
-        }
+    /// 消耗构建器，返回 controllers
+    pub fn build(self) -> HashMap<String, Arc<dyn Controller78>> {
+        self.controllers
     }
 }
 
@@ -163,25 +100,23 @@ async fn api_handler(
 
 /// 创建主路由器 (带认证中间件)
 pub fn create_router() -> Router<()> {
-    let (controllers, open_controllers) = ApiRouter78::new().build();
-    let state = Arc::new(RouterState { controllers, open_controllers });
+    let controllers = ApiRouter78::new().build();
+    let state = Arc::new(RouterState { controllers });
 
     build_router(state)
 }
 
 /// 创建主路由器 (带认证中间件)，允许注入自定义控制器
-pub fn create_router_with_custom<F, G>(
+pub fn create_router_with_custom<F>(
     controller_injector: F,
-    customize_open_router: G,
 ) -> Router<()>
 where
-    F: FnOnce(ApiRouter78) -> (HashMap<String, Arc<dyn Controller78>>, HashMap<String, Arc<dyn Controller78>>),
-    G: FnOnce(Router<()>) -> Router<()>,
+    F: FnOnce(ApiRouter78) -> HashMap<String, Arc<dyn Controller78>>,
 {
-    let (controllers, open_controllers) = controller_injector(ApiRouter78::new());
-    let state = Arc::new(RouterState { controllers, open_controllers });
+    let controllers = controller_injector(ApiRouter78::new());
+    let state = Arc::new(RouterState { controllers });
 
-    build_router_with_custom(state, customize_open_router)
+    build_router(state)
 }
 
 fn build_router(state: Arc<RouterState>) -> Router<()> {
@@ -190,50 +125,21 @@ fn build_router(state: Arc<RouterState>) -> Router<()> {
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
-    let open_router = Router::new()
-        .route("/:apimicro/:apiobj/:apifun", any(open_api_handler))
-        .layer(Extension(state.clone()));
-
     let auth_router = Router::new()
         .route("/:apisys/:apimicro/:apiobj/:apifun", any(api_handler))
         .layer(Extension(state.clone()))
         .layer(middleware::from_fn(sid_auth_middleware));
 
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(|| async { Json(serde_json::json!({"status": "OK"})) }))
-        .nest("/apiopen", open_router)
-        .merge(auth_router)
-        .layer(cors)
-}
+        .merge(auth_router);
 
-fn build_router_with_custom<G>(
-    state: Arc<RouterState>,
-    customize_open_router: G,
-) -> Router<()>
-where
-    G: FnOnce(Router<()>) -> Router<()>,
-{
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+    // 合并全局注册的裸路由（healthz / SSE / 静态页等）
+    for r in crate::router::registry::take_routes() {
+        router = router.merge(r);
+    }
 
-    let open_router_base = Router::new();
-    let open_router_customized = customize_open_router(open_router_base);
-    let open_router = open_router_customized
-        .route("/:apimicro/:apiobj/:apifun", any(open_api_handler))
-        .layer(Extension(state.clone()));
-
-    let auth_router = Router::new()
-        .route("/:apisys/:apimicro/:apiobj/:apifun", any(api_handler))
-        .layer(Extension(state.clone()))
-        .layer(middleware::from_fn(sid_auth_middleware));
-
-    Router::new()
-        .route("/health", get(|| async { Json(serde_json::json!({"status": "OK"})) }))
-        .nest("/apiopen", open_router)
-        .merge(auth_router)
-        .layer(cors)
+    router.layer(cors)
 }
 fn forbidden() -> (StatusCode, [(axum::http::HeaderName, &'static str); 1], Bytes) {
     (

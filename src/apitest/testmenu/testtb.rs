@@ -25,7 +25,7 @@ use crate::{Controller78, async_trait, MysqlCidBase78, Mysql78};
 //         .expect("MySQL 连接失败");
 //     crate::router::registry::register(
 //         "apitest/testmenu/testtb",
-//         Arc::new(MysqlCidBase78::new("testtb", mysql)),
+//         Arc::new(MysqlCidBase78::new("testtb", mysql, vec!["kind".to_string(), "item".to_string(), "data".to_string()])),
 //     );
 // }
 
@@ -51,7 +51,7 @@ pub struct Testtb {
 impl Testtb {
     pub fn new(mysql: Arc<Mysql78>) -> Self {
         Self {
-            base: MysqlCidBase78::new("testtb", mysql),
+            base: MysqlCidBase78::new("testtb", mysql, vec!["kind".to_string(), "item".to_string(), "data".to_string()]),
         }
     }
 
