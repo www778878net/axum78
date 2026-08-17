@@ -5,10 +5,9 @@
 //! 请求格式: UpInfo (JSON)
 //! 响应格式: Response (JSON)
 
-pub mod base78;
+pub mod baseapi;
 pub mod context;
 pub mod response;
-pub mod base_api;
 pub mod router;
 pub mod server;
 
@@ -17,7 +16,7 @@ pub mod apisvc;
 pub mod apigame;
 pub mod apiopen;
 
-pub use base78::{Base78, CidBase78, MysqlBase78, MysqlCidBase78};
+pub use baseapi::{Base78, CidBase78, MysqlBase78, MysqlCidBase78};
 pub use context::{UpInfo, RequestBody, Context, VerifyResult, get_lovers_state, LoversDataState, LoversDataStateMysql, UserInfo, LOVERS_CREATE_SQL, LOVERS_AUTH_CREATE_SQL, AuthConfig, get_auth_config, sid_auth_middleware};
 
 pub const SYNCLOG_CREATE_SQL: &str = r#"CREATE TABLE IF NOT EXISTS synclog (
@@ -40,7 +39,6 @@ pub const SYNCLOG_CREATE_SQL: &str = r#"CREATE TABLE IF NOT EXISTS synclog (
     uptime TEXT NOT NULL DEFAULT ''
 )"#;
 pub use response::{ApiResponse, ApiError};
-pub use base_api::{BaseApi, TableConfig};
 pub use router::{ApiRouter78, Controller78, create_router, create_router_with_custom};
 pub use router::registry::{register, register_route, lookup};
 pub use server::Server;
