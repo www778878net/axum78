@@ -128,12 +128,14 @@ struct MinimalRequest {
     pub jsdata: Option<String>,
     #[serde(default)]
     pub bytedata: Option<Vec<u8>>,
-    #[serde(default)]
-    pub getcols: Vec<String>,
-    #[serde(default)]
-    pub wherecols: Vec<String>,
-    #[serde(default)]
-    pub pars: Vec<serde_json::Value>,
+    // 注：getcols/wherecols/pars 是上一轮错误臆造的字段（TS 真实用的是 UpInfo.cols/pars，且已弃用）。
+    // 不在中间件层解析，列名校验应在 Base.rs 的 crud 方法内完成，故注释掉。
+    // #[serde(default)]
+    // pub getcols: Vec<String>,
+    // #[serde(default)]
+    // pub wherecols: Vec<String>,
+    // #[serde(default)]
+    // pub pars: Vec<serde_json::Value>,
 }
 
 impl Default for MinimalRequest {
@@ -150,9 +152,9 @@ impl Default for MinimalRequest {
             mid: String::new(),
             jsdata: None,
             bytedata: None,
-            getcols: vec![],
-            wherecols: vec![],
-            pars: vec![],
+            // getcols: vec![],
+            // wherecols: vec![],
+            // pars: vec![],
         }
     }
 }
@@ -171,9 +173,9 @@ impl From<MinimalRequest> for UpInfo {
         up.mid = min.mid;
         up.jsdata = min.jsdata;
         up.bytedata = min.bytedata;
-        up.getcols = min.getcols;
-        up.wherecols = min.wherecols;
-        up.pars = min.pars;
+        // up.getcols = min.getcols;
+        // up.wherecols = min.wherecols;
+        // up.pars = min.pars;
         up
     }
 }

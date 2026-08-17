@@ -264,27 +264,21 @@ impl MysqlBase78 {
 
     /// 通用只读查询（对应 NodeJS Base78.get，第759行）
     ///
-    /// 返回列由 getcols 控制（空回退 `*`）；条件列由 wherecols 控制（值从 up.pars 按序取）；
-    /// 全部列名经 cols_imp 白名单校验防注入。
+    /// 列名（条件列）取 `up.cols`（缺失回退表白名单 `cols_imp`），值取 `up.pars`；
+    /// 列名经 `cols_imp` 白名单校验防注入（在 crud 方法内完成，不在中间件）。
+    /// SELECT 固定 `*`（对齐 TS）。
     ///
-    /// SQL: SELECT {getcols 或 *} FROM `{tbname}` WHERE `{uidcid}`=? [AND col=? ...]
+    /// SQL: SELECT * FROM `{tbname}` WHERE `{uidcid}`=? [AND col=? ...]
     ///      ORDER BY {validated_order} LIMIT {up.getnumber} OFFSET {up.getstart}
     pub async fn get(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
         let order = self.validated_order(&up.order);
 
-        // 返回列：getcols 非空则按白名单拼接，空回退 *
-        let select = if !up.getcols.is_empty() {
-            self.validated_getcols(&up.getcols)?
-        } else {
-            "*".to_string()
-        };
-
-        // 条件列：wherecols + pars
-        let (where_clause, params) = self.build_where(&up.wherecols, &up.pars, &up.cid)?;
+        // 条件列：colp = up.cols || cols_imp，列名经白名单校验（对齐 TS 的 colp 处理）
+        let (where_clause, params) = self.build_where(&up.cols, &up.pars, &up.cid)?;
 
         let sql = format!(
-            "SELECT {} FROM `{}` WHERE {} ORDER BY {} LIMIT {} OFFSET {}",
-            select, self.tbname, where_clause, order, up.getnumber, up.getstart
+            "SELECT * FROM `{}` WHERE {} ORDER BY {} LIMIT {} OFFSET {}",
+            self.tbname, where_clause, order, up.getnumber, up.getstart
         );
 
         let up_info = datastate::MysqlUpInfo::new();
@@ -311,6 +305,7 @@ impl MysqlBase78 {
     ///
     /// `WHERE cid = ?`（值 `up.bcid`），可读整个账套数据，属越权面，
     /// 必须显式通过 `set_allow_bcid` 开启，否则拒绝（默认关闭）。
+    /// 条件列取 `up.cols` + `up.pars`，列名经白名单校验（在 crud 方法内完成）。
     pub async fn getby_bcid(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
         if !self.allow_bcid {
             return Err("getbyBcid not allowed for this table".to_string());
@@ -320,19 +315,14 @@ impl MysqlBase78 {
         }
 
         let order = self.validated_order(&up.order);
-        let select = if !up.getcols.is_empty() {
-            self.validated_getcols(&up.getcols)?
-        } else {
-            "*".to_string()
-        };
+        let (where_clause, params) = self.build_where_bcid(&up.cols, &up.pars, &up.bcid)?;
 
         let sql = format!(
-            "SELECT {} FROM `{}` WHERE `cid` = ? ORDER BY {} LIMIT {} OFFSET {}",
-            select, self.tbname, order, up.getnumber, up.getstart
+            "SELECT * FROM `{}` WHERE {} ORDER BY {} LIMIT {} OFFSET {}",
+            self.tbname, where_clause, order, up.getnumber, up.getstart
         );
 
         let up_info = datastate::MysqlUpInfo::new();
-        let params = vec![Value::String(up.bcid.clone())];
 
         self.mysql.do_get(&sql, params, &up_info)
             .map_err(|e| format!("查询失败: {}", e))
@@ -398,42 +388,42 @@ impl MysqlBase78 {
         Ok(result)
     }
 
-    /// 校验返回列白名单，返回 SELECT 列表（防 SQL 注入）
+    /// 构建 WHERE 子句与参数（防 SQL 注入）
     ///
-    /// - `getcols` 为空：返回 `Ok(None)`（调用方回退 `*`）。
-    /// - 非空：逐列校验，业务列须命中 `cols_imp_set`，系统列（id/upby/uptime/uidcid）放行；
-    ///   任一列非法则整体报错。
-    /// - 返回值形如 `` `col1`, `col2` ``。
-    fn validated_getcols(&self, getcols: &[String]) -> Result<String, String> {
-        if getcols.is_empty() {
-            return Err("返回列列表为空".to_string());
-        }
+    /// 列名来自 `up.cols`（条件列），值来自 `up.pars`，逐列经 `cols_imp` 白名单校验，
+    /// 非法即整体报错。`pars` 不足时截断对齐（对齐 TS 的 `colp.slice(0, pars.length)`）。
+    ///
+    /// - 起点固定 `WHERE {uidcid}=?`，参数首元素为 `cid`。
+    /// - 返回 `(where_clause, params)`，params 已按占位符顺序排列。
+    fn build_where(&self, cols: &[String], pars: &[Value], cid: &str) -> Result<(String, Vec<Value>), String> {
+        let mut where_clause = format!("`{}` = ?", self.uidcid);
+        let mut params: Vec<Value> = vec![Value::String(cid.to_string())];
 
-        let mut parts = Vec::with_capacity(getcols.len());
-        for col in getcols {
+        let count = cols.len().min(pars.len());
+        for i in 0..count {
+            let col = &cols[i];
             let lower = col.to_lowercase();
             if !self.is_system_col(col) && !self.cols_imp_set.contains(&lower) {
                 return Err(format!("非法列名 `{}`（不在表 `{}` 的列白名单内）", col, self.tbname));
             }
-            parts.push(format!("`{}`", col));
+            where_clause.push_str(&format!(" AND `{}` = ?", col));
+            params.push(pars[i].clone());
         }
-        Ok(parts.join(", "))
+
+        Ok((where_clause, params))
     }
 
-    /// 构建 WHERE 子句与参数（防 SQL 注入）
+    /// 构建账套公开查询的 WHERE 子句（getby_bcid 专用）
     ///
-    /// - 起点固定 `WHERE {uidcid}=?`，参数首元素为 `cid`。
-    /// - `wherecols` 逐列拼接 `AND {col}=?`，值从 `pars[i]` 取；列名白名单校验，非法即报错。
-    /// - `pars` 不足时截断对齐（对齐 TS 的 colp.slice(0, pars.length)）。
-    ///
-    /// 返回 `(where_clause, params)`，params 已按占位符顺序排列。
-    fn build_where(&self, wherecols: &[String], pars: &[Value], cid: &str) -> Result<(String, Vec<Value>), String> {
-        let mut where_clause = format!("`{}` = ?", self.uidcid);
-        let mut params: Vec<Value> = vec![Value::String(cid.to_string())];
+    /// 列名来自 `up.cols`，值来自 `up.pars`，逐列经白名单校验（防注入）。
+    /// 起点固定 `WHERE cid = ?`，参数首元素为 `up.bcid`。
+    fn build_where_bcid(&self, cols: &[String], pars: &[Value], bcid: &str) -> Result<(String, Vec<Value>), String> {
+        let mut where_clause = "`cid` = ?".to_string();
+        let mut params: Vec<Value> = vec![Value::String(bcid.to_string())];
 
-        let count = wherecols.len().min(pars.len());
+        let count = cols.len().min(pars.len());
         for i in 0..count {
-            let col = &wherecols[i];
+            let col = &cols[i];
             let lower = col.to_lowercase();
             if !self.is_system_col(col) && !self.cols_imp_set.contains(&lower) {
                 return Err(format!("非法列名 `{}`（不在表 `{}` 的列白名单内）", col, self.tbname));
@@ -988,43 +978,11 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_validated_getcols_empty() {
-        let base = mysql_base(vec!["name", "phone"]);
-        let result = base.validated_getcols(&[]);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("返回列列表为空"));
-    }
+    // 列名验证在 crud 方法内部完成（build_where / build_where_bcid），对齐 base78.ts。
+    // 以下测试覆盖 up.cols（条件列）+ up.pars（值）的白名单校验。
 
     #[test]
-    fn test_validated_getcols_legal() {
-        let base = mysql_base(vec!["name", "phone"]);
-        let cols = vec!["name".to_string(), "phone".to_string()];
-        let result = base.validated_getcols(&cols);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "`name`, `phone`");
-    }
-
-    #[test]
-    fn test_validated_getcols_illegal() {
-        let base = mysql_base(vec!["name", "phone"]);
-        let cols = vec!["name".to_string(), "evil; DROP TABLE".to_string()];
-        let result = base.validated_getcols(&cols);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("非法列名"));
-    }
-
-    #[test]
-    fn test_validated_getcols_system_col_allowed() {
-        let base = mysql_base(vec!["name", "phone"]);
-        let cols = vec!["id".to_string(), "uptime".to_string()];
-        let result = base.validated_getcols(&cols);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "`id`, `uptime`");
-    }
-
-    #[test]
-    fn test_build_where_no_wherecols() {
+    fn test_build_where_no_cols() {
         let base = mysql_base(vec!["name", "phone"]);
         let (clause, params) = base.build_where(&[], &[], "cid123").unwrap();
         assert_eq!(clause, "`cid` = ?");
@@ -1035,9 +993,9 @@ mod tests {
     #[test]
     fn test_build_where_normal() {
         let base = mysql_base(vec!["name", "phone"]);
-        let wherecols = vec!["name".to_string(), "phone".to_string()];
+        let cols = vec!["name".to_string(), "phone".to_string()];
         let pars = vec![Value::String("alice".to_string()), Value::String("123".to_string())];
-        let (clause, params) = base.build_where(&wherecols, &pars, "cid123").unwrap();
+        let (clause, params) = base.build_where(&cols, &pars, "cid123").unwrap();
         assert_eq!(clause, "`cid` = ? AND `name` = ? AND `phone` = ?");
         assert_eq!(params.len(), 3);
         assert_eq!(params[1], Value::String("alice".to_string()));
@@ -1047,10 +1005,10 @@ mod tests {
     #[test]
     fn test_build_where_pars_truncated() {
         let base = mysql_base(vec!["name", "phone"]);
-        let wherecols = vec!["name".to_string(), "phone".to_string(), "extra".to_string()];
+        let cols = vec!["name".to_string(), "phone".to_string(), "extra".to_string()];
         let pars = vec![Value::String("alice".to_string())];
-        let (clause, params) = base.build_where(&wherecols, &pars, "cid123").unwrap();
-        // pars 只有 1 个，截断对齐：只拼一个条件
+        let (clause, params) = base.build_where(&cols, &pars, "cid123").unwrap();
+        // pars 只有 1 个，截断对齐：只拼一个条件（对齐 TS colp.slice(0, pars.length)）
         assert_eq!(clause, "`cid` = ? AND `name` = ?");
         assert_eq!(params.len(), 2);
     }
@@ -1058,11 +1016,20 @@ mod tests {
     #[test]
     fn test_build_where_illegal_col() {
         let base = mysql_base(vec!["name", "phone"]);
-        let wherecols = vec!["name".to_string(), "evil".to_string()];
+        let cols = vec!["name".to_string(), "evil".to_string()];
         let pars = vec![Value::String("alice".to_string()), Value::String("x".to_string())];
-        let result = base.build_where(&wherecols, &pars, "cid123");
+        let result = base.build_where(&cols, &pars, "cid123");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("非法列名"));
+    }
+
+    #[test]
+    fn test_build_where_system_col_allowed() {
+        let base = mysql_base(vec!["name", "phone"]);
+        let cols = vec!["id".to_string(), "uptime".to_string()];
+        let pars = vec![Value::String("1".to_string()), Value::String("t".to_string())];
+        let result = base.build_where(&cols, &pars, "cid123");
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -1084,5 +1051,15 @@ mod tests {
         let result = base.getby_bcid(&up).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("缺少 bcid"));
+    }
+
+    #[test]
+    fn test_build_where_bcid_illegal_col() {
+        let base = mysql_base(vec!["name", "phone"]);
+        let cols = vec!["evil".to_string()];
+        let pars = vec![Value::String("x".to_string())];
+        let result = base.build_where_bcid(&cols, &pars, "bcid123");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("非法列名"));
     }
 }
