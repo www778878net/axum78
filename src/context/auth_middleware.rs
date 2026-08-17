@@ -128,6 +128,12 @@ struct MinimalRequest {
     pub jsdata: Option<String>,
     #[serde(default)]
     pub bytedata: Option<Vec<u8>>,
+    #[serde(default)]
+    pub getcols: Vec<String>,
+    #[serde(default)]
+    pub wherecols: Vec<String>,
+    #[serde(default)]
+    pub pars: Vec<serde_json::Value>,
 }
 
 impl Default for MinimalRequest {
@@ -144,6 +150,9 @@ impl Default for MinimalRequest {
             mid: String::new(),
             jsdata: None,
             bytedata: None,
+            getcols: vec![],
+            wherecols: vec![],
+            pars: vec![],
         }
     }
 }
@@ -162,6 +171,9 @@ impl From<MinimalRequest> for UpInfo {
         up.mid = min.mid;
         up.jsdata = min.jsdata;
         up.bytedata = min.bytedata;
+        up.getcols = min.getcols;
+        up.wherecols = min.wherecols;
+        up.pars = min.pars;
         up
     }
 }
@@ -351,6 +363,9 @@ mod tests {
         min.bcid = "test_bcid".to_string();
         min.mid = "test_mid".to_string();
         min.jsdata = Some(r#"{"key":"value"}"#.to_string());
+        min.getcols = vec!["name".to_string(), "phone".to_string()];
+        min.wherecols = vec!["name".to_string()];
+        min.pars = vec![serde_json::json!("alice")];
 
         let up: UpInfo = min.into();
 
@@ -364,6 +379,9 @@ mod tests {
         assert_eq!(up.bcid, "test_bcid");
         assert_eq!(up.mid, "test_mid");
         assert_eq!(up.jsdata, Some(r#"{"key":"value"}"#.to_string()));
+        assert_eq!(up.getcols, vec!["name".to_string(), "phone".to_string()]);
+        assert_eq!(up.wherecols, vec!["name".to_string()]);
+        assert_eq!(up.pars, vec![serde_json::json!("alice")]);
     }
 
     #[test]
@@ -378,7 +396,10 @@ mod tests {
             "order": "uptime desc",
             "bcid": "json_bcid",
             "mid": "json_mid",
-            "jsdata": "[1, 2, 3]"
+            "jsdata": "[1, 2, 3]",
+            "getcols": ["a", "b"],
+            "wherecols": ["a"],
+            "pars": ["x", 1, true]
         }"#;
 
         let req: MinimalRequest = serde_json::from_str(json).unwrap();
@@ -392,6 +413,9 @@ mod tests {
         assert_eq!(req.bcid, "json_bcid");
         assert_eq!(req.mid, "json_mid");
         assert_eq!(req.jsdata, Some("[1, 2, 3]".to_string()));
+        assert_eq!(req.getcols, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(req.wherecols, vec!["a".to_string()]);
+        assert_eq!(req.pars.len(), 3);
     }
 
     #[test]

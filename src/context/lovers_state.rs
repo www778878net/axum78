@@ -598,10 +598,10 @@ impl Default for LoversDataStateMysql {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_verify_sid_empty() {
+    #[tokio::test]
+    async fn test_verify_sid_empty() {
         let state = LoversDataState::new();
-        let result = state.verify_sid("");
+        let result = state.verify_sid("").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("sid为空"));
     }

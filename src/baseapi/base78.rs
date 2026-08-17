@@ -244,8 +244,6 @@ pub struct MysqlBase78 {
     cols_imp_set: HashSet<String>,
     /// 账套公开查询开关（默认关闭，防止越权）
     pub allow_bcid: bool,
-    /// 自定义返回列钩子（子类/调用方可设置，`||||` 分隔列名串，None 表示未覆盖）
-    custom_cols: Option<String>,
 }
 
 /// 系统列：由框架自动追加，业务 JSON 不允许传入
@@ -261,30 +259,22 @@ impl MysqlBase78 {
             cols_imp,
             cols_imp_set,
             allow_bcid: false,
-            custom_cols: None,
         }
     }
 
     /// 通用只读查询（对应 NodeJS Base78.get，第759行）
     ///
-    /// 返回列由 getcols 控制（空回退 *，或 fallback 到 custom_cols 钩子）；
-    /// 条件列由 wherecols 控制（值从 up.pars 按序取）；全部列名经白名单校验防注入。
+    /// 返回列由 getcols 控制（空回退 `*`）；条件列由 wherecols 控制（值从 up.pars 按序取）；
+    /// 全部列名经 cols_imp 白名单校验防注入。
     ///
-    /// SQL: SELECT {getcols} FROM `{tbname}` WHERE `{uidcid}`=? [AND col=? ...]
+    /// SQL: SELECT {getcols 或 *} FROM `{tbname}` WHERE `{uidcid}`=? [AND col=? ...]
     ///      ORDER BY {validated_order} LIMIT {up.getnumber} OFFSET {up.getstart}
     pub async fn get(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
         let order = self.validated_order(&up.order);
 
-        // 返回列：getcols 非空优先，否则回退 custom_cols 钩子，再回退 *
+        // 返回列：getcols 非空则按白名单拼接，空回退 *
         let select = if !up.getcols.is_empty() {
             self.validated_getcols(&up.getcols)?
-        } else if let Some(custom) = &self.custom_cols {
-            let cols = Self::parse_custom_cols(custom);
-            if !cols.is_empty() {
-                self.validated_getcols(&cols)?
-            } else {
-                "*".to_string()
-            }
         } else {
             "*".to_string()
         };
@@ -310,19 +300,7 @@ impl MysqlBase78 {
             .map_err(|e| format!("查询失败: {}", e))
     }
 
-    // ============ 扩展钩子与开关 ============
-
-    /// 自定义返回列钩子（对齐 TS 的 getCustomCols，默认返回 `'||||'` 占位符）
-    ///
-    /// 子类/调用方可覆盖 `custom_cols` 字段，`get` 在 `up.getcols` 为空时作为返回列来源。
-    pub fn get_custom_cols(&self) -> String {
-        self.custom_cols.clone().unwrap_or_else(|| "||||".to_string())
-    }
-
-    /// 设置自定义返回列（`||||` 分隔列名串，覆盖默认 `'||||'` 钩子）
-    pub fn set_custom_cols(&mut self, cols: &str) {
-        self.custom_cols = Some(cols.to_string());
-    }
+    // ============ 扩展开关 ============
 
     /// 开启账套公开查询（getby_bcid），默认关闭（越权保护）
     pub fn set_allow_bcid(&mut self) {
@@ -465,15 +443,6 @@ impl MysqlBase78 {
         }
 
         Ok((where_clause, params))
-    }
-
-    /// 解析自定义返回列串（`||||` 分隔），过滤空段
-    fn parse_custom_cols(s: &str) -> Vec<String> {
-        s.split('|')
-            .map(|seg| seg.trim())
-            .filter(|seg| !seg.is_empty())
-            .map(|seg| seg.to_string())
-            .collect()
     }
 
     /// 校验 ORDER BY 排序字段，防止注入
@@ -729,14 +698,6 @@ impl MysqlCidBase78 {
 
     pub async fn getby_bcid(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
         self.base.getby_bcid(up).await
-    }
-
-    pub fn get_custom_cols(&self) -> String {
-        self.base.get_custom_cols()
-    }
-
-    pub fn set_custom_cols(&mut self, cols: &str) {
-        self.base.set_custom_cols(cols);
     }
 
     pub fn set_allow_bcid(&mut self) {
@@ -1102,27 +1063,6 @@ mod tests {
         let result = base.build_where(&wherecols, &pars, "cid123");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("非法列名"));
-    }
-
-    #[test]
-    fn test_parse_custom_cols() {
-        let cols = MysqlBase78::parse_custom_cols("a|b||c|");
-        assert_eq!(cols, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
-        let empty = MysqlBase78::parse_custom_cols("||||");
-        assert!(empty.is_empty());
-    }
-
-    #[test]
-    fn test_get_custom_cols_default() {
-        let base = mysql_base(vec!["name"]);
-        assert_eq!(base.get_custom_cols(), "||||");
-    }
-
-    #[test]
-    fn test_get_custom_cols_override() {
-        let mut base = mysql_base(vec!["name", "phone"]);
-        base.set_custom_cols("name|phone");
-        assert_eq!(base.get_custom_cols(), "name|phone");
     }
 
     #[tokio::test]

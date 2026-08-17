@@ -42,7 +42,6 @@ mod tests {
         assert!(body.pars.is_empty());
         assert!(body.cols.is_empty());
         assert!(body.mid.is_empty());
-        assert!(body.mid.is_none());
         assert!(body.order.is_empty());
         assert!(body.start.is_none());
         assert!(body.number.is_none());
@@ -55,7 +54,6 @@ mod tests {
             "pars": [1, "text", true],
             "cols": ["col1", "col2"],
             "mid": "mid123",
-            "mid": 100,
             "order": "id DESC",
             "start": 0,
             "number": 10
@@ -66,7 +64,6 @@ mod tests {
         assert_eq!(body.pars.len(), 3);
         assert_eq!(body.cols.len(), 2);
         assert_eq!(body.mid, "mid123");
-        assert_eq!(body.mid, Some(100));
         assert_eq!(body.order, "id DESC");
         assert_eq!(body.start, Some(0));
         assert_eq!(body.number, Some(10));
