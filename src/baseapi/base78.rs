@@ -264,17 +264,21 @@ impl MysqlBase78 {
 
     /// 通用只读查询（对应 NodeJS Base78.get，第759行）
     ///
-    /// 列名（条件列）取 `up.cols`（缺失回退表白名单 `cols_imp`），值取 `up.pars`；
-    /// 列名经 `cols_imp` 白名单校验防注入（在 crud 方法内完成，不在中间件）。
+    /// 条件列取「已验证」的 `up.wherecols`（由 `check_request` 从 `wherecolsn` 校验写入），
+    /// 值从 `up.jsdata` 解析的同名列取（对齐 `m_add`/`m_update` 的 `parse_jsdata_kv`）。
+    /// 列名经 `cols_imp` 白名单校验防注入（在 `check_request` 内完成）。
     /// SELECT 固定 `*`（对齐 TS）。
     ///
     /// SQL: SELECT * FROM `{tbname}` WHERE `{uidcid}`=? [AND col=? ...]
     ///      ORDER BY {validated_order} LIMIT {up.getnumber} OFFSET {up.getstart}
     pub async fn get(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
+        // 先控制器（注册时已确定列），再校验：用「控制器已知的列」验证请求里的 wherecolsn / order
+        self.check_request(up)?;
         let order = self.validated_order(&up.order);
 
-        // 条件列：colp = up.cols || cols_imp，列名经白名单校验（对齐 TS 的 colp 处理）
-        let (where_clause, params) = self.build_where(&up.cols, &up.pars, &up.cid)?;
+        // 条件列：已验证的 wherecols；值从 jsdata 同名列取
+        let where_values = self.where_values_from_jsdata(up)?;
+        let (where_clause, params) = self.build_where(&up.wherecols, &where_values, &up.cid)?;
 
         let sql = format!(
             "SELECT * FROM `{}` WHERE {} ORDER BY {} LIMIT {} OFFSET {}",
@@ -305,7 +309,7 @@ impl MysqlBase78 {
     ///
     /// `WHERE cid = ?`（值 `up.bcid`），可读整个账套数据，属越权面，
     /// 必须显式通过 `set_allow_bcid` 开启，否则拒绝（默认关闭）。
-    /// 条件列取 `up.cols` + `up.pars`，列名经白名单校验（在 crud 方法内完成）。
+    /// 条件列取「已验证」的 `up.wherecols`，值从 `up.jsdata` 解析的同名列取。
     pub async fn getby_bcid(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
         if !self.allow_bcid {
             return Err("getbyBcid not allowed for this table".to_string());
@@ -314,8 +318,11 @@ impl MysqlBase78 {
             return Err("缺少 bcid 参数".to_string());
         }
 
+        // 先控制器（注册时已确定列），再校验：用「控制器已知的列」验证请求里的 wherecolsn / order
+        self.check_request(up)?;
         let order = self.validated_order(&up.order);
-        let (where_clause, params) = self.build_where_bcid(&up.cols, &up.pars, &up.bcid)?;
+        let where_values = self.where_values_from_jsdata(up)?;
+        let (where_clause, params) = self.build_where_bcid(&up.wherecols, &where_values, &up.bcid)?;
 
         let sql = format!(
             "SELECT * FROM `{}` WHERE {} ORDER BY {} LIMIT {} OFFSET {}",
@@ -390,8 +397,8 @@ impl MysqlBase78 {
 
     /// 构建 WHERE 子句与参数（防 SQL 注入）
     ///
-    /// 列名来自 `up.cols`（条件列），值来自 `up.pars`，逐列经 `cols_imp` 白名单校验，
-    /// 非法即整体报错。`pars` 不足时截断对齐（对齐 TS 的 `colp.slice(0, pars.length)`）。
+    /// 列名来自「已验证」的 `wherecols`，值来自 `up.jsdata` 解析的同名列，
+    /// 逐列经 `cols_imp` 白名单校验，非法即整体报错。`pars` 不足时截断对齐（对齐 TS）。
     ///
     /// - 起点固定 `WHERE {uidcid}=?`，参数首元素为 `cid`。
     /// - 返回 `(where_clause, params)`，params 已按占位符顺序排列。
@@ -415,7 +422,7 @@ impl MysqlBase78 {
 
     /// 构建账套公开查询的 WHERE 子句（getby_bcid 专用）
     ///
-    /// 列名来自 `up.cols`，值来自 `up.pars`，逐列经白名单校验（防注入）。
+    /// 列名来自「已验证」的 `up.wherecols`，值来自 `up.jsdata` 解析的同名列，逐列经白名单校验（防注入）。
     /// 起点固定 `WHERE cid = ?`，参数首元素为 `up.bcid`。
     fn build_where_bcid(&self, cols: &[String], pars: &[Value], bcid: &str) -> Result<(String, Vec<Value>), String> {
         let mut where_clause = "`cid` = ?".to_string();
@@ -433,6 +440,66 @@ impl MysqlBase78 {
         }
 
         Ok((where_clause, params))
+    }
+
+    /// 从 `up.jsdata` 解析 KV，按「已验证」的 `up.wherecols` 列名取出 WHERE 条件值。
+    ///
+    /// 对齐 `m_add`/`m_update` 的 `parse_jsdata_kv` 取值约定；某条件列在 jsdata 中缺值则整体报错。
+    fn where_values_from_jsdata(&self, up: &UpInfo) -> Result<Vec<Value>, String> {
+        if up.wherecols.is_empty() {
+            return Ok(vec![]);
+        }
+        let (jcols, jvals) = Self::parse_jsdata_kv(up)?;
+        let kv: std::collections::HashMap<&str, &Value> =
+            jcols.iter().zip(jvals.iter()).map(|(c, v)| (c.as_str(), v)).collect();
+        let mut values = Vec::with_capacity(up.wherecols.len());
+        for col in &up.wherecols {
+            let val = kv.get(col.as_str())
+                .ok_or_else(|| format!("get 条件列 `{}` 在 jsdata 中无对应值", col))?;
+            values.push((*val).clone());
+        }
+        Ok(values)
+    }
+
+    /// 第一步静态校验入口（无需登录 SID）：用控制器已知列白名单校验请求上传的列名，
+    /// 把「未验证」字段转换为「已验证」字段，供后续 get/getby_bcid 等业务只读。
+    ///
+    /// 流程（对齐 TS base78.ts：先控制器定列 → 用已知列校验请求）：
+    /// 1. `wherecolsn` 逐列校验 `cols_imp_set` → 通过则写入 `wherecols`；非法则整体报错拒绝。
+    /// 2. `getcolsn` 逐列校验 `cols_imp_set` → 通过则写入 `getcols`。
+    /// 3. `ordern` 经 `validated_order` 校验（非法回退 `id DESC`）→ 写入 `order`。
+    ///
+    /// 铁律：业务层只读已验证字段（`wherecols`/`getcols`/`order`/`cid`），绝不直接读
+    /// `wherecolsn`/`getcolsn`/`ordern`/`cidn`。未验证字段仅入口/框架内部流转。
+    pub fn check_request(&self, up: &mut UpInfo) -> Result<(), String> {
+        // 1. WHERE 列名白名单校验（trim "where " 前缀再用裸列名查 cols_imp_set）
+        for col in &up.wherecolsn {
+            self.validate_query_col(col.trim_start_matches("where "))?;
+        }
+        up.wherecols = up.wherecolsn.clone();
+
+        // 2. SELECT 返回列名白名单校验
+        for col in &up.getcolsn {
+            self.validate_query_col(col.trim_start_matches("where "))?;
+        }
+        up.getcols = up.getcolsn.clone();
+
+        // 3. 排序字段校验（非法回退 id DESC）
+        up.order = self.validated_order(&up.ordern);
+
+        Ok(())
+    }
+
+    /// 校验查询列名（wherecols / getcols 用的列名），非法则报错
+    fn validate_query_col(&self, col: &str) -> Result<(), String> {
+        if self.is_system_col(col) {
+            return Ok(());
+        }
+        let lower = col.to_lowercase();
+        if !self.cols_imp_set.contains(&lower) {
+            return Err(format!("非法列名 `{}`（不在表 `{}` 的列白名单内）", col, self.tbname));
+        }
+        Ok(())
     }
 
     /// 校验 ORDER BY 排序字段，防止注入
@@ -979,7 +1046,7 @@ mod tests {
     }
 
     // 列名验证在 crud 方法内部完成（build_where / build_where_bcid），对齐 base78.ts。
-    // 以下测试覆盖 up.cols（条件列）+ up.pars（值）的白名单校验。
+    // 以下测试覆盖 wherecols（条件列）+ jsdata 解析值（值）的白名单校验。
 
     #[test]
     fn test_build_where_no_cols() {

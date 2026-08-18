@@ -32,23 +32,48 @@ pub struct WeWorkConfig {
 
 static WEWORK_CONFIG: OnceLock<WeWorkConfig> = OnceLock::new();
 
-/// Load WeWork config from ini file
+/// Load WeWork config from ini file (环境变量优先，其次读 docs/config/{env}.ini)
+///
+/// 敏感凭证（corp_secret/token/encoding_aes_key 等）不再硬编码，
+/// 统一通过 `ProjectPath::read_ini_value` 读取：
+/// - 环境变量优先（key 转大写，如 `corp_id` → `CORP_ID`）
+/// - 无环境变量时读 `docs/config/{APP_ENV}.ini` 的 `[wework]` 段
 pub fn get_wework_config() -> &'static WeWorkConfig {
     WEWORK_CONFIG.get_or_init(|| {
-        // 直接硬编码配置，确保能够正确加载
-        WeWorkConfig {
-            corp_id: "ww3ef0a56dd553c560".to_string(),
-            corp_secret: "y5XDM8MI4Jh3bYLKlqABv9TcpD743UlFjmk7YLJrOic".to_string(),
-            agent_id: "1000003".to_string(),
-            admin_userid: "HuChengBo".to_string(),
-            chatid_jhs: "wrtP6ZUQAA59rR35tlbfBDQewToLGIow".to_string(),
-            chatid_admin: "HuChengBo".to_string(),
-            default_to_user: "@all".to_string(),
-            token: "KsceAuDMlf6dE4HL9fnIVuy3G5LV".to_string(),
-            encoding_aes_key: "YZnoKhiEjD65bzXWHeBCngy1rAnzQMw6mWamesyQBnT".to_string(),
-            safe: 0,
-            token_cache_seconds: 7200,
+        let project = ProjectPath::find().unwrap_or_default();
+        let get = |key: &str| -> String {
+            project.read_ini_value("wework", key).unwrap_or_default()
+        };
+
+        let safe = get("safe").parse::<i32>().unwrap_or(0);
+        let token_cache_seconds = get("token_cache_seconds").parse::<i64>().unwrap_or(7200);
+
+        let config = WeWorkConfig {
+            corp_id: get("corp_id"),
+            corp_secret: get("corp_secret"),
+            agent_id: get("agent_id"),
+            admin_userid: get("admin_userid"),
+            chatid_jhs: get("chatid_jhs"),
+            chatid_admin: get("chatid_admin"),
+            default_to_user: if get("default_to_user").is_empty() {
+                "@all".to_string()
+            } else {
+                get("default_to_user")
+            },
+            token: get("token"),
+            encoding_aes_key: get("encoding_aes_key"),
+            safe,
+            token_cache_seconds,
+        };
+
+        // 启动时检测缺失的关键配置，记录告警（不 panic）
+        if config.corp_id.is_empty() || config.corp_secret.is_empty() || config.agent_id.is_empty() {
+            tracing::error!(
+                "企微配置缺失：corp_id/agent_id/corp_secret 未在环境变量或 docs/config/*.ini 的 [wework] 段中配置"
+            );
         }
+
+        config
     })
 }
 

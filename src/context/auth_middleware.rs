@@ -128,14 +128,14 @@ struct MinimalRequest {
     pub jsdata: Option<String>,
     #[serde(default)]
     pub bytedata: Option<Vec<u8>>,
-    // 注：getcols/wherecols/pars 是上一轮错误臆造的字段（TS 真实用的是 UpInfo.cols/pars，且已弃用）。
-    // 不在中间件层解析，列名校验应在 Base.rs 的 crud 方法内完成，故注释掉。
-    // #[serde(default)]
-    // pub getcols: Vec<String>,
-    // #[serde(default)]
-    // pub wherecols: Vec<String>,
-    // #[serde(default)]
-    // pub pars: Vec<serde_json::Value>,
+    // 上传原始「未验证」字段（对齐 base::UpInfo 的 *n 系列）：
+    // 由 Base78::check_request 校验后写入已验证字段（wherecols/getcols/order），业务只读已验证字段。
+    #[serde(default)]
+    pub wherecolsn: Vec<String>,
+    #[serde(default)]
+    pub getcolsn: Vec<String>,
+    #[serde(default)]
+    pub ordern: String,
 }
 
 impl Default for MinimalRequest {
@@ -152,9 +152,9 @@ impl Default for MinimalRequest {
             mid: String::new(),
             jsdata: None,
             bytedata: None,
-            // getcols: vec![],
-            // wherecols: vec![],
-            // pars: vec![],
+            wherecolsn: vec![],
+            getcolsn: vec![],
+            ordern: String::new(),
         }
     }
 }
@@ -173,9 +173,10 @@ impl From<MinimalRequest> for UpInfo {
         up.mid = min.mid;
         up.jsdata = min.jsdata;
         up.bytedata = min.bytedata;
-        // up.getcols = min.getcols;
-        // up.wherecols = min.wherecols;
-        // up.pars = min.pars;
+        // 只填「未验证」上传字段，已验证字段留待 Base78::check_request 写入
+        up.wherecolsn = min.wherecolsn;
+        up.getcolsn = min.getcolsn;
+        up.ordern = min.ordern;
         up
     }
 }
@@ -365,9 +366,9 @@ mod tests {
         min.bcid = "test_bcid".to_string();
         min.mid = "test_mid".to_string();
         min.jsdata = Some(r#"{"key":"value"}"#.to_string());
-        min.getcols = vec!["name".to_string(), "phone".to_string()];
-        min.wherecols = vec!["name".to_string()];
-        min.pars = vec![serde_json::json!("alice")];
+        min.wherecolsn = vec!["name".to_string()];
+        min.getcolsn = vec!["name".to_string(), "phone".to_string()];
+        min.ordern = "id asc".to_string();
 
         let up: UpInfo = min.into();
 
@@ -381,9 +382,10 @@ mod tests {
         assert_eq!(up.bcid, "test_bcid");
         assert_eq!(up.mid, "test_mid");
         assert_eq!(up.jsdata, Some(r#"{"key":"value"}"#.to_string()));
-        assert_eq!(up.getcols, vec!["name".to_string(), "phone".to_string()]);
-        assert_eq!(up.wherecols, vec!["name".to_string()]);
-        assert_eq!(up.pars, vec![serde_json::json!("alice")]);
+        // 转换只填「未验证」上传字段，已验证字段留待 Base78::check_request 写入
+        assert_eq!(up.wherecolsn, vec!["name".to_string()]);
+        assert_eq!(up.getcolsn, vec!["name".to_string(), "phone".to_string()]);
+        assert_eq!(up.ordern, "id asc");
     }
 
     #[test]
@@ -399,9 +401,9 @@ mod tests {
             "bcid": "json_bcid",
             "mid": "json_mid",
             "jsdata": "[1, 2, 3]",
-            "getcols": ["a", "b"],
-            "wherecols": ["a"],
-            "pars": ["x", 1, true]
+            "wherecolsn": ["a"],
+            "getcolsn": ["a", "b"],
+            "ordern": "uptime desc"
         }"#;
 
         let req: MinimalRequest = serde_json::from_str(json).unwrap();
@@ -415,9 +417,9 @@ mod tests {
         assert_eq!(req.bcid, "json_bcid");
         assert_eq!(req.mid, "json_mid");
         assert_eq!(req.jsdata, Some("[1, 2, 3]".to_string()));
-        assert_eq!(req.getcols, vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(req.wherecols, vec!["a".to_string()]);
-        assert_eq!(req.pars.len(), 3);
+        assert_eq!(req.wherecolsn, vec!["a".to_string()]);
+        assert_eq!(req.getcolsn, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(req.ordern, "uptime desc");
     }
 
     #[test]
