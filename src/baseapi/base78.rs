@@ -278,7 +278,7 @@ impl MysqlBase78 {
         let order = self.validated_order(&up.order);
 
         // 条件列：已验证的 wherecols；值从 jsdata 同名列取
-        let where_values = self.where_values_from_jsdata(up)?;
+        let where_values = self.where_values_from_jsdata(&up)?;
         let (where_clause, params) = self.build_where(&up.wherecols, &where_values, &up.cid)?;
 
         let sql = format!(
@@ -323,7 +323,7 @@ impl MysqlBase78 {
         let mut up = up.clone();
         self.check_request(&mut up)?;
         let order = self.validated_order(&up.order);
-        let where_values = self.where_values_from_jsdata(up)?;
+        let where_values = self.where_values_from_jsdata(&up)?;
         let (where_clause, params) = self.build_where_bcid(&up.wherecols, &where_values, &up.bcid)?;
 
         let sql = format!(
