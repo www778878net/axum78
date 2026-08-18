@@ -20,7 +20,7 @@ use axum::{
     body::Bytes,
     http::{Method, StatusCode},
 };
-use base::{UpInfo, Response};
+use crate::base::{UpInfo, Response};
 use datastate::{
     Mysql78, MysqlConfig,
     data_sync::synclog_mysql::{SynclogMysql, SynclogMysqlItem},
@@ -117,7 +117,7 @@ fn get_mysql_config() -> MysqlConfig {
     }
     
     // 从配置文件直接读取（使用 load_ini_config 避免环境变量污染）
-    if let Ok(p) = base::ProjectPath::find() {
+    if let Ok(p) = crate::base::ProjectPath::find() {
         if let Ok(ini) = p.load_ini_config() {
             if let Some(mysql_section) = ini.get("mysql") {
                 let host = mysql_section.get("host").cloned().unwrap_or_default();

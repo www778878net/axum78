@@ -10,7 +10,7 @@ use axum::{
     body::Bytes,
     http::StatusCode,
 };
-use base::{UpInfo, Response, ProjectPath};
+use crate::base::{UpInfo, Response, ProjectPath};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 

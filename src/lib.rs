@@ -19,6 +19,9 @@ pub mod apiopen;
 pub use baseapi::{Base78, CidBase78, MysqlBase78, MysqlCidBase78};
 pub use context::{UpInfo, RequestBody, Context, VerifyResult, get_lovers_state, LoversDataState, LoversDataStateMysql, UserInfo, LOVERS_CREATE_SQL, LOVERS_AUTH_CREATE_SQL, AuthConfig, get_auth_config, sid_auth_middleware};
 
+// 自包含基础库（复制自 rustbase，axum78 不依赖外部 rustbase crate）
+pub mod base;
+
 pub const SYNCLOG_CREATE_SQL: &str = r#"CREATE TABLE IF NOT EXISTS synclog (
     idpk INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,
@@ -52,7 +55,9 @@ pub use axum::{
     http::StatusCode,
 };
 
-pub use base::Response;
+pub use crate::base::Response;
+// mylogger! 宏内部使用 $crate::get_logger，需在 crate 根可见
+pub use base::get_logger;
 
 // Re-export wework config
 pub use apiopen::wework::get_wework_config;

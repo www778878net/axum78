@@ -28,7 +28,6 @@ async-trait = "0.1"
 
 # 数据库
 datastate = { path = "../datastate" }
-base = { path = "../rustbase" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 mysql = "25"
 md5 = "0.7"
@@ -40,6 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 工具
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+parking_lot = "0.12"
 aes = "0.8"
 cbc = "0.1"
 base64 = "0.22"

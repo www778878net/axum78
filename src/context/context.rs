@@ -3,7 +3,7 @@
 //! 直接重导出 base::UpInfo
 
 // 重导出 base::UpInfo
-pub use base::UpInfo;
+pub use crate::base::UpInfo;
 
 /// 请求体格式 - 对应 logsvc POST 请求体
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
