@@ -85,6 +85,12 @@ pub struct UpInfo {
     // ============ 上传临时存 验证后再用 ============
     /// 公司ID (待验证)
     pub cidn: String,
+    /// 上传原始 WHERE 列名（未验证），经 check_request 校验后写入 wherecols
+    pub wherecolsn: Vec<String>,
+    /// 上传原始 SELECT 列名（未验证），经 check_request 校验后写入 getcols
+    pub getcolsn: Vec<String>,
+    /// 上传原始排序字段（未验证），经 check_request 校验后写入 order
+    pub ordern: String,
 
     // ============ 需数据库读取验证 ============
     /// 会话 ID
@@ -170,6 +176,9 @@ impl UpInfo {
             errmessage: String::new(),
 
             cidn: String::new(),
+            wherecolsn: vec![],
+            getcolsn: vec![],
+            ordern: String::new(),
 
             sid: String::new(),
             cid: String::new(),
