@@ -273,7 +273,8 @@ impl MysqlBase78 {
     ///      ORDER BY {validated_order} LIMIT {up.getnumber} OFFSET {up.getstart}
     pub async fn get(&self, up: &mut UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
         // 先控制器（注册时已确定列），再校验：用「控制器已知的列」验证请求里的 wherecolsn / order
-        self.check_request(up)?;
+        let mut up = up.clone();
+        self.check_request(&mut up)?;
         let order = self.validated_order(&up.order);
 
         // 条件列：已验证的 wherecols；值从 jsdata 同名列取
@@ -319,7 +320,8 @@ impl MysqlBase78 {
         }
 
         // 先控制器（注册时已确定列），再校验：用「控制器已知的列」验证请求里的 wherecolsn / order
-        self.check_request(up)?;
+        let mut up = up.clone();
+        self.check_request(&mut up)?;
         let order = self.validated_order(&up.order);
         let where_values = self.where_values_from_jsdata(up)?;
         let (where_clause, params) = self.build_where_bcid(&up.wherecols, &where_values, &up.bcid)?;
