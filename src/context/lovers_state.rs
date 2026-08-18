@@ -228,7 +228,7 @@ static MYSQL_POOL: once_cell::sync::Lazy<Arc<Mutex<Option<Arc<Mysql78>>>>> =
 
 /// 获取 MySQL 配置（从配置文件读取，优先使用环境变量）
 fn get_mysql_config() -> MysqlConfig {
-    let config = crate::base::ProjectPath::find()
+    let config = datastate::base::ProjectPath::find()
         .ok()
         .and_then(|p| p.load_ini_config().ok());
 

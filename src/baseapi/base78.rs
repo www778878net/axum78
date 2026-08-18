@@ -12,7 +12,7 @@ use axum::{
     http::{Method, StatusCode},
 };
 use datastate::{DataState, LocalDB, Mysql78, MysqlUpInfo};
-use crate::base::{MyLogger, Response, UpInfo};
+use datastate::base::{MyLogger, Response, UpInfo};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -271,7 +271,7 @@ impl MysqlBase78 {
     ///
     /// SQL: SELECT * FROM `{tbname}` WHERE `{uidcid}`=? [AND col=? ...]
     ///      ORDER BY {validated_order} LIMIT {up.getnumber} OFFSET {up.getstart}
-    pub async fn get(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
+    pub async fn get(&self, up: &mut UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
         // 先控制器（注册时已确定列），再校验：用「控制器已知的列」验证请求里的 wherecolsn / order
         self.check_request(up)?;
         let order = self.validated_order(&up.order);
@@ -310,7 +310,7 @@ impl MysqlBase78 {
     /// `WHERE cid = ?`（值 `up.bcid`），可读整个账套数据，属越权面，
     /// 必须显式通过 `set_allow_bcid` 开启，否则拒绝（默认关闭）。
     /// 条件列取「已验证」的 `up.wherecols`，值从 `up.jsdata` 解析的同名列取。
-    pub async fn getby_bcid(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
+    pub async fn getby_bcid(&self, up: &mut UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
         if !self.allow_bcid {
             return Err("getbyBcid not allowed for this table".to_string());
         }
@@ -745,7 +745,7 @@ impl MysqlCidBase78 {
         }
     }
 
-    pub async fn get(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
+    pub async fn get(&self, up: &mut UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
         self.base.get(up).await
     }
 
@@ -753,7 +753,7 @@ impl MysqlCidBase78 {
         self.base.do_get(sql, params).await
     }
 
-    pub async fn getby_bcid(&self, up: &UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
+    pub async fn getby_bcid(&self, up: &mut UpInfo) -> Result<Vec<HashMap<String, Value>>, String> {
         self.base.getby_bcid(up).await
     }
 
@@ -787,11 +787,11 @@ impl MysqlCidBase78 {
 
     /// 内置 call 分发（完整 CRUD），子类无需手写
     async fn _call(&self, up: &mut UpInfo, fun: &str) -> Value {
-        let up_clone = up.clone();
+        let mut up_clone = up.clone();
         let fun_lower = fun.to_lowercase();
         let result: (StatusCode, Bytes) = match fun_lower.as_str() {
             "get" => {
-                match self.get(&up_clone).await {
+                match self.get(&mut up_clone).await {
                     Ok(rows) => {
                         let arr: Vec<Value> = rows.iter()
                             .map(|row| serde_json::to_value(row).unwrap_or(Value::Null))
@@ -806,7 +806,7 @@ impl MysqlCidBase78 {
                 }
             }
             "getbybcid" => {
-                match self.getby_bcid(&up_clone).await {
+                match self.getby_bcid(&mut up_clone).await {
                     Ok(rows) => {
                         let arr: Vec<Value> = rows.iter()
                             .map(|row| serde_json::to_value(row).unwrap_or(Value::Null))

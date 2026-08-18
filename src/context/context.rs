@@ -3,7 +3,7 @@
 //! 直接重导出 base::UpInfo
 
 // 重导出 base::UpInfo
-pub use crate::base::UpInfo;
+pub use datastate::base::UpInfo;
 
 /// 请求体格式 - 对应 logsvc POST 请求体
 ///

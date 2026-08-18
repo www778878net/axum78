@@ -10,7 +10,7 @@ use axum::{
     body::Bytes,
     http::{Method, StatusCode, header},
 };
-use crate::base::Response;
+use datastate::base::Response;
 use sha1::{Sha1, Digest};
 use std::collections::HashMap;
 use crate::{get_wework_config, datastate::daily::{self, DailySubject, DailyUserScore, DailyAnswerRecord}};

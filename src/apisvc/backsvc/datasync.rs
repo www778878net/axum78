@@ -15,7 +15,7 @@ use axum::{
     body::Bytes,
     http::{Method, StatusCode},
 };
-use crate::base::{UpInfo, Response};
+use datastate::base::{UpInfo, Response};
 use datastate::LocalDB;
 use datastate::datastate::DataState;
 use crate::router::Controller78;
@@ -232,7 +232,7 @@ async fn do_work(up: &UpInfo, db: &LocalDB) -> (StatusCode, Bytes) {
     ensure_datasync_table(db).await;
 
     let expected_worker = {
-        let p = crate::base::ProjectPath::find().unwrap_or_default();
+        let p = datastate::base::ProjectPath::find().unwrap_or_default();
         p.worker_name().unwrap_or_else(|| "local".to_string())
     };
 
